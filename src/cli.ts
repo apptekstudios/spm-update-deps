@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { readdirSync, statSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import process from "node:process";
 import { XcodeProject } from "@bacons/xcode";
@@ -34,36 +34,36 @@ function validateDirectoryPath(directoryPath: string): void {
   }
 }
 
-function findPbxprojFilePath(rootDir: string): string | null {
-  const stack: string[] = [rootDir];
-  const visited = new Set<string>();
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    if (visited.has(dir)) continue;
-    visited.add(dir);
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
+type ProjectFiles = {
+  pbxproj: string | null;
+  packageSwift: string | null;
+};
+
+function findProjectFiles(rootDir: string): ProjectFiles {
+  const result: ProjectFiles = { pbxproj: null, packageSwift: null };
+  let entries;
+  try {
+    entries = readdirSync(rootDir, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+  for (const entry of entries) {
+    if (entry.isFile() && entry.name === "Package.swift") {
+      result.packageSwift = resolve(rootDir, entry.name);
     }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (entry.name === "node_modules" || entry.name === ".git") continue;
-        if (entry.name.endsWith(".xcodeproj")) {
-          const candidate = resolve(dir, entry.name, "project.pbxproj");
-          try {
-            const stats = statSync(candidate);
-            if (stats.isFile()) return candidate;
-          } catch {
-            // ignore
-          }
+    if (entry.isDirectory() && entry.name.endsWith(".xcodeproj")) {
+      const candidate = resolve(rootDir, entry.name, "project.pbxproj");
+      try {
+        const stats = statSync(candidate);
+        if (stats.isFile()) {
+          result.pbxproj = candidate;
         }
-        stack.push(resolve(dir, entry.name));
+      } catch {
+        // ignore
       }
     }
   }
-  return null;
+  return result;
 }
 
 type SwiftPackage = {
@@ -98,7 +98,7 @@ function formatRequirement(requirement: any): string {
   }
 }
 
-function getSwiftPackages(project: XcodeProject): SwiftPackage[] {
+function getSwiftPackagesFromXcode(project: XcodeProject): SwiftPackage[] {
   const packages: SwiftPackage[] = [];
   const seen = new Set<string>();
   for (const [, obj] of project.entries()) {
@@ -116,6 +116,146 @@ function getSwiftPackages(project: XcodeProject): SwiftPackage[] {
   return packages;
 }
 
+type PackageSwiftDependency = {
+  url: string;
+  requirement: string;
+  match: string;
+  startIndex: number;
+  endIndex: number;
+};
+
+function parsePackageSwiftDependencies(content: string): PackageSwiftDependency[] {
+  const deps: PackageSwiftDependency[] = [];
+  const seen = new Set<string>();
+
+  // Match .package(url: "...", ...) patterns
+  // Supports various version specifications:
+  // - from: "1.0.0"
+  // - .upToNextMajor(from: "1.0.0")
+  // - .upToNextMinor(from: "1.0.0")
+  // - exact: "1.0.0"
+  // - .exact("1.0.0")
+  // - branch: "main"
+  // - .branch("main")
+  // - revision: "abc123"
+  // - .revision("abc123")
+  // - "1.0.0"..<"2.0.0" or "1.0.0"..."2.0.0"
+  const packageRegex = /\.package\s*\(\s*url\s*:\s*"([^"]+)"\s*,\s*([^)]+)\)/g;
+
+  let match;
+  while ((match = packageRegex.exec(content)) !== null) {
+    const url = match[1];
+    const versionSpec = match[2].trim();
+    const requirement = parseVersionSpec(versionSpec);
+
+    if (!seen.has(url)) {
+      deps.push({
+        url,
+        requirement,
+        match: match[0],
+        startIndex: match.index,
+        endIndex: match.index + match[0].length,
+      });
+      seen.add(url);
+    }
+  }
+
+  return deps;
+}
+
+function parseVersionSpec(spec: string): string {
+  // from: "X.Y.Z"
+  let m = spec.match(/from\s*:\s*"([^"]+)"/);
+  if (m) return `^${m[1]}`;
+
+  // .upToNextMajor(from: "X.Y.Z")
+  m = spec.match(/\.upToNextMajor\s*\(\s*from\s*:\s*"([^"]+)"\s*\)/);
+  if (m) return `^${m[1]}`;
+
+  // .upToNextMinor(from: "X.Y.Z")
+  m = spec.match(/\.upToNextMinor\s*\(\s*from\s*:\s*"([^"]+)"\s*\)/);
+  if (m) return `~${m[1]}`;
+
+  // exact: "X.Y.Z"
+  m = spec.match(/exact\s*:\s*"([^"]+)"/);
+  if (m) return `exact ${m[1]}`;
+
+  // .exact("X.Y.Z")
+  m = spec.match(/\.exact\s*\(\s*"([^"]+)"\s*\)/);
+  if (m) return `exact ${m[1]}`;
+
+  // branch: "name"
+  m = spec.match(/branch\s*:\s*"([^"]+)"/);
+  if (m) return `branch ${m[1]}`;
+
+  // .branch("name")
+  m = spec.match(/\.branch\s*\(\s*"([^"]+)"\s*\)/);
+  if (m) return `branch ${m[1]}`;
+
+  // revision: "hash"
+  m = spec.match(/revision\s*:\s*"([^"]+)"/);
+  if (m) return `revision ${m[1]}`;
+
+  // .revision("hash")
+  m = spec.match(/\.revision\s*\(\s*"([^"]+)"\s*\)/);
+  if (m) return `revision ${m[1]}`;
+
+  // Range: "X.Y.Z"..<"A.B.C" or "X.Y.Z"..."A.B.C"
+  m = spec.match(/"([^"]+)"\s*\.\.<?\.?\s*"([^"]+)"/);
+  if (m) return `>=${m[1]} <${m[2]}`;
+
+  return spec.trim();
+}
+
+function getSwiftPackagesFromPackageSwift(packageSwiftPath: string): SwiftPackage[] {
+  const content = readFileSync(packageSwiftPath, "utf8");
+  const deps = parsePackageSwiftDependencies(content);
+  return deps.map((d) => ({ url: d.url, requirement: d.requirement }));
+}
+
+function updatePackageSwiftToLatest(
+  packageSwiftPath: string,
+  latestByUrl: Map<string, string>,
+): UpdateChange[] {
+  const content = readFileSync(packageSwiftPath, "utf8");
+  const deps = parsePackageSwiftDependencies(content);
+  const changes: UpdateChange[] = [];
+
+  // Process in reverse order to maintain correct indices
+  const sortedDeps = [...deps].sort((a, b) => b.startIndex - a.startIndex);
+  let newContent = content;
+
+  for (const dep of sortedDeps) {
+    const latest = latestByUrl.get(dep.url) ?? null;
+    const nextReq = latest ? `^${latest}` : null;
+    const doUpdate = latest !== null && dep.requirement !== nextReq;
+
+    if (doUpdate && latest) {
+      const newMatch = `.package(url: "${dep.url}", from: "${latest}")`;
+      newContent =
+        newContent.slice(0, dep.startIndex) +
+        newMatch +
+        newContent.slice(dep.endIndex);
+    }
+
+    changes.push({
+      url: dep.url,
+      prev: dep.requirement,
+      next: nextReq,
+      latest,
+      updated: doUpdate,
+    });
+  }
+
+  const updatedCount = changes.filter((c) => c.updated).length;
+  if (updatedCount > 0) {
+    writeFileSync(packageSwiftPath, newContent, "utf8");
+  }
+
+  // Return in original order
+  return changes.reverse();
+}
+
 async function getLatestVersionFromGit(url: string): Promise<string | null> {
   try {
     const { stdout } = await $`git ls-remote --tags --refs ${url}`.quiet();
@@ -131,7 +271,7 @@ async function getLatestVersionFromGit(url: string): Promise<string | null> {
       // Only accept tags that look like semantic versions (x.y.z with optional pre-release/build metadata)
       // This filters out non-version tags like "paul-rn-1020-podspecs"
       const parsed = semver.valid(clean);
-      if (parsed) {
+      if (parsed && !semver.prerelease(parsed)) {
         versions.push(parsed);
       }
     }
@@ -213,38 +353,7 @@ function updateProjectRequirementsToLatest(
   return changes;
 }
 
-async function main(): Promise<void> {
-  const args = Bun.argv.slice(2);
-  const shouldUpdate = hasUpdateArg(args);
-  const targetDirectoryPath = getTargetDirectoryFromArgs(args);
-  validateDirectoryPath(targetDirectoryPath);
-  const pbxprojPath = findPbxprojFilePath(targetDirectoryPath);
-  if (!pbxprojPath) {
-    console.error(
-      `Error: No .xcodeproj/project.pbxproj found under: ${targetDirectoryPath}`,
-    );
-    process.exit(1);
-  }
-  const project = XcodeProject.open(pbxprojPath);
-  const packages = getSwiftPackages(project);
-  if (packages.length === 0) {
-    console.log("No Swift Package dependencies found.");
-    return;
-  }
-  const latestByUrl = await getLatestVersions(packages.map((p) => p.url));
-  if (!shouldUpdate) {
-    for (const pkg of packages) {
-      const latest = latestByUrl.get(pkg.url);
-      const suffix = latest ? ` (latest: ${latest})` : " (latest: unknown)";
-      console.log(`${pkg.url} \u2192 ${pkg.requirement}${suffix}`);
-    }
-    return;
-  }
-  const changes = updateProjectRequirementsToLatest(project, latestByUrl);
-  const updatedCount = changes.filter((c) => c.updated).length;
-  if (updatedCount > 0) {
-    writeFileSync(project.filePath, build(project.toJSON()), "utf8");
-  }
+function printChanges(changes: UpdateChange[]): void {
   for (const c of changes) {
     if (c.updated && c.next) {
       console.log(
@@ -258,8 +367,96 @@ async function main(): Promise<void> {
       console.log(`${c.url} \u2192 ${c.prev} (latest: unknown) [no change]`);
     }
   }
+}
+
+async function main(): Promise<void> {
+  const args = Bun.argv.slice(2);
+  const shouldUpdate = hasUpdateArg(args);
+  const targetDirectoryPath = getTargetDirectoryFromArgs(args);
+  validateDirectoryPath(targetDirectoryPath);
+  const projectFiles = findProjectFiles(targetDirectoryPath);
+
+  if (!projectFiles.pbxproj && !projectFiles.packageSwift) {
+    console.error(
+      `Error: No .xcodeproj/project.pbxproj or Package.swift found under: ${targetDirectoryPath}`,
+    );
+    process.exit(1);
+  }
+
+  // Collect packages from all sources
+  const allPackages: SwiftPackage[] = [];
+
+  if (projectFiles.pbxproj) {
+    const project = XcodeProject.open(projectFiles.pbxproj);
+    const xcodePackages = getSwiftPackagesFromXcode(project);
+    allPackages.push(...xcodePackages);
+  }
+
+  if (projectFiles.packageSwift) {
+    const packageSwiftPackages = getSwiftPackagesFromPackageSwift(
+      projectFiles.packageSwift,
+    );
+    allPackages.push(...packageSwiftPackages);
+  }
+
+  // Dedupe by URL for fetching latest versions
+  const uniqueUrls = [...new Set(allPackages.map((p) => p.url))];
+
+  if (uniqueUrls.length === 0) {
+    console.log("No Swift Package dependencies found.");
+    return;
+  }
+
+  const latestByUrl = await getLatestVersions(uniqueUrls);
+
+  if (!shouldUpdate) {
+    if (projectFiles.pbxproj) {
+      console.log(`Xcode project: ${projectFiles.pbxproj}`);
+      const project = XcodeProject.open(projectFiles.pbxproj);
+      const packages = getSwiftPackagesFromXcode(project);
+      for (const pkg of packages) {
+        const latest = latestByUrl.get(pkg.url);
+        const suffix = latest ? ` (latest: ${latest})` : " (latest: unknown)";
+        console.log(`  ${pkg.url} \u2192 ${pkg.requirement}${suffix}`);
+      }
+    }
+    if (projectFiles.packageSwift) {
+      console.log(`Package.swift: ${projectFiles.packageSwift}`);
+      const packages = getSwiftPackagesFromPackageSwift(projectFiles.packageSwift);
+      for (const pkg of packages) {
+        const latest = latestByUrl.get(pkg.url);
+        const suffix = latest ? ` (latest: ${latest})` : " (latest: unknown)";
+        console.log(`  ${pkg.url} \u2192 ${pkg.requirement}${suffix}`);
+      }
+    }
+    return;
+  }
+
+  let totalUpdated = 0;
+
+  // Update Xcode project
+  if (projectFiles.pbxproj) {
+    console.log(`Xcode project: ${projectFiles.pbxproj}`);
+    const project = XcodeProject.open(projectFiles.pbxproj);
+    const changes = updateProjectRequirementsToLatest(project, latestByUrl);
+    const updatedCount = changes.filter((c) => c.updated).length;
+    if (updatedCount > 0) {
+      writeFileSync(project.filePath, build(project.toJSON()), "utf8");
+    }
+    printChanges(changes);
+    totalUpdated += updatedCount;
+  }
+
+  // Update Package.swift
+  if (projectFiles.packageSwift) {
+    console.log(`Package.swift: ${projectFiles.packageSwift}`);
+    const changes = updatePackageSwiftToLatest(projectFiles.packageSwift, latestByUrl);
+    printChanges(changes);
+    totalUpdated += changes.filter((c) => c.updated).length;
+  }
+
   console.log(
-    `Updated ${updatedCount} package requirement${updatedCount === 1 ? "" : "s"} to upToNextMajorVersion.`,
+    `Updated ${totalUpdated} package requirement${totalUpdated === 1 ? "" : "s"}.`,
   );
 }
 
