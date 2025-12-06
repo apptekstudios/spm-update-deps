@@ -8,14 +8,141 @@ import { $ } from "bun";
 import semver from "semver";
 import { build } from "@bacons/xcode/json";
 
+// ANSI color codes
+const colors = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  magenta: "\x1b[35m",
+  cyan: "\x1b[36m",
+  red: "\x1b[31m",
+  gray: "\x1b[90m",
+};
+
+function extractPackageName(url: string): string {
+  const match = url.match(/\/([^/]+?)(\.git)?$/);
+  return match?.[1] ?? url;
+}
+
+type TableRow = {
+  package: string;
+  current: string;
+  latest: string;
+  status: "up-to-date" | "update-available" | "unknown" | "updated" | "skipped";
+};
+
+function printTable(rows: TableRow[], title: string): void {
+  if (rows.length === 0) return;
+
+  // Calculate column widths
+  const headers = ["Package", "Current", "Latest", "Status"];
+  const colWidths = [
+    Math.max(headers[0].length, ...rows.map((r) => r.package.length)),
+    Math.max(headers[1].length, ...rows.map((r) => r.current.length)),
+    Math.max(headers[2].length, ...rows.map((r) => r.latest.length)),
+    Math.max(headers[3].length, 16), // "Update Available" is 16 chars
+  ];
+
+  const totalWidth = colWidths.reduce((a, b) => a + b, 0) + colWidths.length * 3 + 1;
+  const horizontalLine = colors.gray + "─".repeat(totalWidth) + colors.reset;
+
+  // Print title
+  console.log();
+  console.log(`${colors.bold}${colors.cyan}${title}${colors.reset}`);
+  console.log(horizontalLine);
+
+  // Print header
+  const header = headers
+    .map((h, i) => `${colors.bold}${h.padEnd(colWidths[i])}${colors.reset}`)
+    .join(` ${colors.gray}│${colors.reset} `);
+  console.log(` ${header}`);
+  console.log(horizontalLine);
+
+  // Print rows
+  for (const row of rows) {
+    const statusColor =
+      row.status === "up-to-date"
+        ? colors.green
+        : row.status === "updated"
+          ? colors.green
+          : row.status === "update-available"
+            ? colors.yellow
+            : row.status === "skipped"
+              ? colors.magenta
+              : colors.gray;
+
+    const statusText =
+      row.status === "up-to-date"
+        ? "Up to date"
+        : row.status === "updated"
+          ? "Updated"
+          : row.status === "update-available"
+            ? "Update Available"
+            : row.status === "skipped"
+              ? "Skipped"
+              : "Unknown";
+
+    const latestColor =
+      row.status === "update-available" || row.status === "updated"
+        ? colors.green
+        : row.status === "unknown"
+          ? colors.gray
+          : colors.reset;
+
+    const rowStr = [
+      `${colors.blue}${row.package.padEnd(colWidths[0])}${colors.reset}`,
+      `${row.current.padEnd(colWidths[1])}`,
+      `${latestColor}${row.latest.padEnd(colWidths[2])}${colors.reset}`,
+      `${statusColor}${statusText.padEnd(colWidths[3])}${colors.reset}`,
+    ].join(` ${colors.gray}│${colors.reset} `);
+
+    console.log(` ${rowStr}`);
+  }
+
+  console.log(horizontalLine);
+}
+
 function hasUpdateArg(argv: string[]): boolean {
   return argv.includes("update");
 }
 
+function getSkipPackages(argv: string[]): Set<string> {
+  const skipPackages = new Set<string>();
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--skip" || arg === "-s") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        skipPackages.add(next.toLowerCase());
+        i++;
+      }
+    } else if (arg.startsWith("--skip=")) {
+      const value = arg.slice("--skip=".length);
+      if (value) {
+        skipPackages.add(value.toLowerCase());
+      }
+    }
+  }
+  return skipPackages;
+}
+
+function shouldSkipPackage(url: string, skipPackages: Set<string>): boolean {
+  if (skipPackages.size === 0) return false;
+  const packageName = extractPackageName(url).toLowerCase();
+  return skipPackages.has(packageName);
+}
+
 function getTargetDirectoryFromArgs(argv: string[]): string {
-  const positionalPath = argv.find(
-    (arg) => arg !== "update" && !arg.startsWith("-"),
-  );
+  const positionalPath = argv.find((arg, i) => {
+    if (arg === "update" || arg.startsWith("-")) return false;
+    // Check if this arg is a value for --skip
+    const prevArg = argv[i - 1];
+    if (prevArg === "--skip" || prevArg === "-s") return false;
+    return true;
+  });
   const rawPath = positionalPath ?? ".";
   return isAbsolute(rawPath) ? rawPath : resolve(process.cwd(), rawPath);
 }
@@ -163,6 +290,8 @@ function parsePackageSwiftDependencies(content: string): PackageSwiftDependency[
   return deps;
 }
 
+type RequirementKind = "upToNextMajor" | "upToNextMinor" | "exact" | "branch" | "revision" | "range" | "unknown";
+
 function parseVersionSpec(spec: string): string {
   // from: "X.Y.Z"
   let m = spec.match(/from\s*:\s*"([^"]+)"/);
@@ -207,6 +336,42 @@ function parseVersionSpec(spec: string): string {
   return spec.trim();
 }
 
+function getRequirementKind(requirement: string): RequirementKind {
+  if (requirement.startsWith("^")) return "upToNextMajor";
+  if (requirement.startsWith("~")) return "upToNextMinor";
+  if (requirement.startsWith("exact ")) return "exact";
+  if (requirement.startsWith("branch ")) return "branch";
+  if (requirement.startsWith("revision ")) return "revision";
+  if (requirement.startsWith(">=")) return "range";
+  return "unknown";
+}
+
+function formatUpdatedRequirement(currentReq: string, latestVersion: string): string {
+  const kind = getRequirementKind(currentReq);
+  switch (kind) {
+    case "exact":
+      return `exact ${latestVersion}`;
+    case "upToNextMinor":
+      return `~${latestVersion}`;
+    case "upToNextMajor":
+    default:
+      return `^${latestVersion}`;
+  }
+}
+
+function generatePackageSwiftSpec(currentReq: string, latestVersion: string): string {
+  const kind = getRequirementKind(currentReq);
+  switch (kind) {
+    case "exact":
+      return `.exact("${latestVersion}")`;
+    case "upToNextMinor":
+      return `.upToNextMinor(from: "${latestVersion}")`;
+    case "upToNextMajor":
+    default:
+      return `from: "${latestVersion}"`;
+  }
+}
+
 function getSwiftPackagesFromPackageSwift(packageSwiftPath: string): SwiftPackage[] {
   const content = readFileSync(packageSwiftPath, "utf8");
   const deps = parsePackageSwiftDependencies(content);
@@ -216,6 +381,7 @@ function getSwiftPackagesFromPackageSwift(packageSwiftPath: string): SwiftPackag
 function updatePackageSwiftToLatest(
   packageSwiftPath: string,
   latestByUrl: Map<string, string>,
+  skipPackages: Set<string>,
 ): UpdateChange[] {
   const content = readFileSync(packageSwiftPath, "utf8");
   const deps = parsePackageSwiftDependencies(content);
@@ -226,12 +392,14 @@ function updatePackageSwiftToLatest(
   let newContent = content;
 
   for (const dep of sortedDeps) {
+    const isSkipped = shouldSkipPackage(dep.url, skipPackages);
     const latest = latestByUrl.get(dep.url) ?? null;
-    const nextReq = latest ? `^${latest}` : null;
-    const doUpdate = latest !== null && dep.requirement !== nextReq;
+    const nextReq = latest ? formatUpdatedRequirement(dep.requirement, latest) : null;
+    const doUpdate = !isSkipped && latest !== null && dep.requirement !== nextReq;
 
     if (doUpdate && latest) {
-      const newMatch = `.package(url: "${dep.url}", from: "${latest}")`;
+      const versionSpec = generatePackageSwiftSpec(dep.requirement, latest);
+      const newMatch = `.package(url: "${dep.url}", ${versionSpec})`;
       newContent =
         newContent.slice(0, dep.startIndex) +
         newMatch +
@@ -244,6 +412,7 @@ function updatePackageSwiftToLatest(
       next: nextReq,
       latest,
       updated: doUpdate,
+      skipped: isSkipped,
     });
   }
 
@@ -304,11 +473,38 @@ type UpdateChange = {
   next: string | null;
   latest: string | null;
   updated: boolean;
+  skipped?: boolean;
 };
+
+function createXcodeRequirement(prevRequirement: any, latestVersion: string): any {
+  const kind = prevRequirement?.kind ?? prevRequirement?.requirement;
+  switch (kind) {
+    case "exactVersion":
+    case "exact":
+      return {
+        kind: "exactVersion",
+        version: latestVersion,
+      };
+    case "upToNextMinorVersion":
+    case "upToNextMinor":
+      return {
+        kind: "upToNextMinorVersion",
+        minimumVersion: latestVersion,
+      };
+    case "upToNextMajorVersion":
+    case "upToNextMajor":
+    default:
+      return {
+        kind: "upToNextMajorVersion",
+        minimumVersion: latestVersion,
+      };
+  }
+}
 
 function updateProjectRequirementsToLatest(
   project: XcodeProject,
   latestByUrl: Map<string, string>,
+  skipPackages: Set<string>,
 ): UpdateChange[] {
   const changes: UpdateChange[] = [];
   for (const [, obj] of project.entries()) {
@@ -316,6 +512,7 @@ function updateProjectRequirementsToLatest(
       const url: string | undefined =
         (obj as any).props?.repositoryURL ?? (obj as any).props?.repositoryUrl;
       if (!url) continue;
+      const isSkipped = shouldSkipPackage(url, skipPackages);
       const prev = (obj as any).props?.requirement;
       const prevText = formatRequirement(prev);
       const latest = latestByUrl.get(url) ?? null;
@@ -326,15 +523,13 @@ function updateProjectRequirementsToLatest(
           next: null,
           latest: null,
           updated: false,
+          skipped: isSkipped,
         });
         continue;
       }
-      const nextRequirement = {
-        kind: "upToNextMajorVersion",
-        minimumVersion: latest,
-      } as any;
+      const nextRequirement = createXcodeRequirement(prev, latest);
       const nextText = formatRequirement(nextRequirement);
-      const doUpdate = prevText !== nextText;
+      const doUpdate = !isSkipped && prevText !== nextText;
       if (doUpdate) {
         (obj as any).props = {
           ...(obj as any).props,
@@ -347,31 +542,79 @@ function updateProjectRequirementsToLatest(
         next: nextText,
         latest,
         updated: doUpdate,
+        skipped: isSkipped,
       });
     }
   }
   return changes;
 }
 
-function printChanges(changes: UpdateChange[]): void {
-  for (const c of changes) {
-    if (c.updated && c.next) {
-      console.log(
-        `${c.url} \u2192 ${c.prev} => ${c.next} (latest: ${c.latest})`,
-      );
-    } else if (c.latest) {
-      console.log(
-        `${c.url} \u2192 ${c.prev} (latest: ${c.latest}) [no change]`,
-      );
-    } else {
-      console.log(`${c.url} \u2192 ${c.prev} (latest: unknown) [no change]`);
-    }
+function isRequirementUpToDate(requirement: string, latest: string): boolean {
+  const kind = getRequirementKind(requirement);
+  switch (kind) {
+    case "exact":
+      return requirement === `exact ${latest}`;
+    case "upToNextMinor":
+      return requirement === `~${latest}`;
+    case "upToNextMajor":
+      return requirement === `^${latest}`;
+    default:
+      return false;
   }
+}
+
+function changesToTableRows(changes: UpdateChange[], isUpdateMode: boolean): TableRow[] {
+  return changes.map((c) => {
+    let status: TableRow["status"];
+    if (c.skipped) {
+      status = "skipped";
+    } else if (c.updated) {
+      status = "updated";
+    } else if (!c.latest) {
+      status = "unknown";
+    } else if (isRequirementUpToDate(c.prev, c.latest)) {
+      status = "up-to-date";
+    } else {
+      status = isUpdateMode ? "up-to-date" : "update-available";
+    }
+
+    return {
+      package: extractPackageName(c.url),
+      current: c.prev,
+      latest: c.latest ?? "—",
+      status,
+    };
+  });
+}
+
+function packagesToTableRows(
+  packages: SwiftPackage[],
+  latestByUrl: Map<string, string>,
+): TableRow[] {
+  return packages.map((pkg) => {
+    const latest = latestByUrl.get(pkg.url);
+    let status: TableRow["status"];
+    if (!latest) {
+      status = "unknown";
+    } else if (isRequirementUpToDate(pkg.requirement, latest)) {
+      status = "up-to-date";
+    } else {
+      status = "update-available";
+    }
+
+    return {
+      package: extractPackageName(pkg.url),
+      current: pkg.requirement,
+      latest: latest ?? "—",
+      status,
+    };
+  });
 }
 
 async function main(): Promise<void> {
   const args = Bun.argv.slice(2);
   const shouldUpdate = hasUpdateArg(args);
+  const skipPackages = getSkipPackages(args);
   const targetDirectoryPath = getTargetDirectoryFromArgs(args);
   validateDirectoryPath(targetDirectoryPath);
   const projectFiles = findProjectFiles(targetDirectoryPath);
@@ -403,32 +646,42 @@ async function main(): Promise<void> {
   const uniqueUrls = [...new Set(allPackages.map((p) => p.url))];
 
   if (uniqueUrls.length === 0) {
-    console.log("No Swift Package dependencies found.");
+    console.log();
+    console.log(`${colors.yellow}No Swift Package dependencies found.${colors.reset}`);
+    console.log();
     return;
   }
 
   const latestByUrl = await getLatestVersions(uniqueUrls);
 
   if (!shouldUpdate) {
+    let totalUpdatesAvailable = 0;
+
     if (projectFiles.pbxproj) {
-      console.log(`Xcode project: ${projectFiles.pbxproj}`);
       const project = XcodeProject.open(projectFiles.pbxproj);
       const packages = getSwiftPackagesFromXcode(project);
-      for (const pkg of packages) {
-        const latest = latestByUrl.get(pkg.url);
-        const suffix = latest ? ` (latest: ${latest})` : " (latest: unknown)";
-        console.log(`  ${pkg.url} \u2192 ${pkg.requirement}${suffix}`);
-      }
+      const rows = packagesToTableRows(packages, latestByUrl);
+      printTable(rows, `Xcode Project`);
+      totalUpdatesAvailable += rows.filter((r) => r.status === "update-available").length;
     }
+
     if (projectFiles.packageSwift) {
-      console.log(`Package.swift: ${projectFiles.packageSwift}`);
       const packages = getSwiftPackagesFromPackageSwift(projectFiles.packageSwift);
-      for (const pkg of packages) {
-        const latest = latestByUrl.get(pkg.url);
-        const suffix = latest ? ` (latest: ${latest})` : " (latest: unknown)";
-        console.log(`  ${pkg.url} \u2192 ${pkg.requirement}${suffix}`);
-      }
+      const rows = packagesToTableRows(packages, latestByUrl);
+      printTable(rows, `Package.swift`);
+      totalUpdatesAvailable += rows.filter((r) => r.status === "update-available").length;
     }
+
+    console.log();
+    if (totalUpdatesAvailable > 0) {
+      console.log(
+        `${colors.yellow}${totalUpdatesAvailable} update${totalUpdatesAvailable === 1 ? "" : "s"} available.${colors.reset} ` +
+        `Run with ${colors.cyan}update${colors.reset} to apply changes.`
+      );
+    } else {
+      console.log(`${colors.green}All packages are up to date.${colors.reset}`);
+    }
+    console.log();
     return;
   }
 
@@ -436,28 +689,34 @@ async function main(): Promise<void> {
 
   // Update Xcode project
   if (projectFiles.pbxproj) {
-    console.log(`Xcode project: ${projectFiles.pbxproj}`);
     const project = XcodeProject.open(projectFiles.pbxproj);
-    const changes = updateProjectRequirementsToLatest(project, latestByUrl);
+    const changes = updateProjectRequirementsToLatest(project, latestByUrl, skipPackages);
     const updatedCount = changes.filter((c) => c.updated).length;
     if (updatedCount > 0) {
       writeFileSync(project.filePath, build(project.toJSON()), "utf8");
     }
-    printChanges(changes);
+    const rows = changesToTableRows(changes, true);
+    printTable(rows, `Xcode Project`);
     totalUpdated += updatedCount;
   }
 
   // Update Package.swift
   if (projectFiles.packageSwift) {
-    console.log(`Package.swift: ${projectFiles.packageSwift}`);
-    const changes = updatePackageSwiftToLatest(projectFiles.packageSwift, latestByUrl);
-    printChanges(changes);
+    const changes = updatePackageSwiftToLatest(projectFiles.packageSwift, latestByUrl, skipPackages);
+    const rows = changesToTableRows(changes, true);
+    printTable(rows, `Package.swift`);
     totalUpdated += changes.filter((c) => c.updated).length;
   }
 
-  console.log(
-    `Updated ${totalUpdated} package requirement${totalUpdated === 1 ? "" : "s"}.`,
-  );
+  console.log();
+  if (totalUpdated > 0) {
+    console.log(
+      `${colors.green}✓ Successfully updated ${totalUpdated} package${totalUpdated === 1 ? "" : "s"}.${colors.reset}`
+    );
+  } else {
+    console.log(`${colors.green}All packages are already up to date.${colors.reset}`);
+  }
+  console.log();
 }
 
 main().catch((error) => {
