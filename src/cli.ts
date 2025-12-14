@@ -578,10 +578,13 @@ function changesToTableRows(changes: UpdateChange[], isUpdateMode: boolean): Tab
       status = isUpdateMode ? "up-to-date" : "update-available";
     }
 
+    // In update mode, show the formatted requirement (e.g., ^2.0.0) instead of raw version
+    const latestDisplay = c.next ?? (c.latest ? formatUpdatedRequirement(c.prev, c.latest) : "—");
+
     return {
       package: extractPackageName(c.url),
       current: c.prev,
-      latest: c.latest ?? "—",
+      latest: latestDisplay,
       status,
     };
   });
@@ -602,10 +605,13 @@ function packagesToTableRows(
       status = "update-available";
     }
 
+    // Show the formatted requirement (e.g., ^2.0.0) based on current requirement type
+    const latestDisplay = latest ? formatUpdatedRequirement(pkg.requirement, latest) : "—";
+
     return {
       package: extractPackageName(pkg.url),
       current: pkg.requirement,
-      latest: latest ?? "—",
+      latest: latestDisplay,
       status,
     };
   });
