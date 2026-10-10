@@ -5,7 +5,7 @@ description: Find outdated Swift Package Manager dependencies in Package.swift o
 
 # spm-update
 
-`spm-update` (or `bun run src/cli.ts` in this repo) reads `Package.swift` and `*.xcodeproj`
+`spm-update` (or `swift run spm-update` in this repo) reads `Package.swift` and `*.xcodeproj`
 and compares each dependency's version to its git tags.
 
 ## Workflow

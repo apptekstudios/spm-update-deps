@@ -12,20 +12,20 @@ projects (`.xcodeproj`). It works well for people at a terminal and for coding a
 - **Minimal edits:** only the requirement text changes. Your formatting, comments, extra arguments such as `traits:`, and the requirement style (`from:` vs `.upToNextMajor(from:)`) are kept. Xcode projects get a few-line diff, not a re-serialized file.
 - **Requirement kinds are preserved:** an exact pin stays exact, a range stays a range, and branch/revision pins are never changed without an explicit version.
 - **Output formats:** a colored table and interactive mode for people; compact TSV and JSON for agents and scripts.
-- **Fast lookups:** tags come from a single HTTP request per repository (git protocol v2), 16 in parallel. `git ls-remote` is the fallback for SSH and private repositories, so your credentials still work. Lookups never hang on prompts and are cached for 10 minutes. A 146-manifest repo with 210 dependencies checks in under a second.
+- **Fast lookups:** tags come from a single HTTP request per repository (git protocol v2), 16 in parallel. `git ls-remote` is the fallback for SSH and private repositories, so your credentials still work. Lookups never hang on prompts and are cached for 10 minutes. A 146-manifest repo with 210 dependencies checks in about a second, and cached runs take tens of milliseconds.
 - **Prerelease aware:** if you're on a beta or rc (`from: "5.0.0-beta"`) and the release is out, it's flagged so you move to the real release.
 
 ## Installation
 
-Requires [Bun](https://bun.sh) to build and `git` at runtime.
+A single native binary (about 2 MB, nothing else to install) that needs `git` at runtime. Build it with Swift 5.9 or later:
 
 ```bash
-bun install
-bun run build                           # creates ./dist/spm-update
-mv ./dist/spm-update /usr/local/bin/    # optional
+git clone https://github.com/apptekstudios/spm-update-deps.git && cd spm-update-deps
+swift build -c release
+cp .build/release/spm-update /usr/local/bin/        # optional
 ```
 
-Or run it from source: `bun run src/cli.ts [command] [path] [options]`.
+Or with [Mint](https://github.com/yonaskolb/Mint): `mint install apptekstudios/spm-update-deps`. To build a universal macOS binary, use `swift build -c release --arch arm64 --arch x86_64`; it lands in `.build/apple/Products/Release/`.
 
 ## Usage
 
@@ -146,11 +146,12 @@ A JSON dependency looks like this. The `inRange` field means the current require
 ## Development
 
 ```bash
-bun install
-bun test           # unit and end-to-end tests (e2e uses local git repos, no network)
-bun run typecheck
-bun run src/cli.ts --help
+swift build                     # debug build: .build/debug/spm-update
+swift test                      # unit and end-to-end tests (e2e uses local git repos, no network)
+swift run spm-update --help
 ```
+
+CI builds and tests on macOS and Linux, and reports the release binary's size.
 
 ## License
 

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version
+      - name: Test
+        run: swift test
+      - name: Build universal release binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          BIN=.build/apple/Products/Release/spm-update
+          strip -rSTx "$BIN"
+          mkdir -p dist && cp "$BIN" dist/spm-update
+          lipo -info dist/spm-update
+          otool -L dist/spm-update
+      - name: Binary size
+        run: |
+          ls -l dist/spm-update
+          lipo dist/spm-update -thin arm64 -output /tmp/spm-update-arm64
+          {
+            echo "### spm-update binary size (macOS)"
+            echo "| build | bytes | MB |"
+            echo "|---|---|---|"
+            for f in dist/spm-update /tmp/spm-update-arm64; do
+              b=$(stat -f%z "$f"); echo "| $(basename "$f") $( [ "$f" = dist/spm-update ] && echo universal || echo arm64) | $b | $(echo "scale=2; $b/1048576" | bc) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Smoke test against GitHub
+        run: |
+          mkdir -p /tmp/sample && cat > /tmp/sample/Package.swift <<'SWIFT'
+          // swift-tools-version:5.9
+          import PackageDescription
+          let package = Package(name: "Sample", dependencies: [
+              .package(url: "https://github.com/apple/swift-log.git", from: "1.4.0"),
+              .package(url: "https://github.com/apple/swift-argument-parser", .upToNextMinor(from: "1.2.0")),
+          ])
+          SWIFT
+          time dist/spm-update check /tmp/sample --tsv --no-cache
+          dist/spm-update apply /tmp/sample swift-log@minor --dry-run
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spm-update-macos-universal
+          path: dist/spm-update
+
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:6.1-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: apt-get update -qq && apt-get install -y -qq git curl >/dev/null
+      - name: Test
+        run: swift test
+      - name: Release build
+        run: swift build -c release && ls -l .build/release/spm-update
