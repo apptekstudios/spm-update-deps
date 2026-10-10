@@ -56,6 +56,13 @@ jobs:
           SWIFT
           stage/spm-update check sample --tsv --no-cache | tee out.tsv
           grep -q "swift-log" out.tsv
+      - name: Skill installer
+        run: |
+          (cd dist && shasum -a 256 *.tar.gz > SHA256SUMS)
+          SPM_UPDATE_VERSION="$VERSION" SPM_UPDATE_BASE_URL="file://$PWD/dist" SPM_UPDATE_INSTALL_DIR="$RUNNER_TEMP/bin" \
+            sh skills/spm-update/scripts/install.sh
+          "$RUNNER_TEMP/bin/spm-update" --version
+          rm dist/SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: dist-macos
@@ -116,6 +123,15 @@ jobs:
           SWIFT
           ./spm-update check sample --tsv --no-cache | tee out.tsv
           grep -q "swift-log" out.tsv
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - name: Skill installer
+        run: |
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          SPM_UPDATE_VERSION="${{ needs.version.outputs.version }}" SPM_UPDATE_BASE_URL="file://$PWD/dist" SPM_UPDATE_INSTALL_DIR="$RUNNER_TEMP/bin" \
+            sh src/skills/spm-update/scripts/install.sh
+          "$RUNNER_TEMP/bin/spm-update" --version
 
   homebrew:
     needs: [version, macos, linux]

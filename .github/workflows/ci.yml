@@ -52,3 +52,20 @@ jobs:
           brew audit --strict local/spm-update-core/spm-update
           brew style local/spm-update-core/spm-update
           brew linkage --test local/spm-update-core/spm-update
+
+  # The agent skill published through skills.sh: valid per the Agent Skills spec, and found and
+  # installed (with its scripts) by the `skills` CLI.
+  skill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate against the Agent Skills spec
+        run: |
+          pip install --quiet skills-ref
+          agentskills validate skills/spm-update
+      - name: Install with the skills CLI
+        run: |
+          mkdir "$RUNNER_TEMP/project" && cd "$RUNNER_TEMP/project"
+          npx --yes skills add "$GITHUB_WORKSPACE" --skill spm-update --agent claude-code --yes
+          test -f .claude/skills/spm-update/SKILL.md
+          test -x .claude/skills/spm-update/scripts/install.sh

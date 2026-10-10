@@ -1,7 +1,7 @@
 # Agent guide
 
 The full recipe for using this CLI to find and apply Swift package updates is in
-[.claude/skills/spm-update/SKILL.md](.claude/skills/spm-update/SKILL.md). In short:
+[skills/spm-update/SKILL.md](skills/spm-update/SKILL.md). In short:
 
 ```bash
 spm-update check <path> --tsv --outdated        # what's outdated (cheapest output)

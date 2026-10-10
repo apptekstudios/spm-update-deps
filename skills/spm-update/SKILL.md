@@ -1,12 +1,25 @@
 ---
 name: spm-update
 description: Find outdated Swift Package Manager dependencies in Package.swift or .xcodeproj files and apply chosen version bumps in bulk. Use when asked to check, audit or update SPM/Swift package versions.
+license: MIT
+compatibility: Needs the spm-update CLI (macOS 13+ or Linux; installed by scripts/install.sh or Homebrew), git (and curl on Linux), and network access to the packages' git hosts.
+metadata:
+  author: apptekstudios
+  repository: https://github.com/apptekstudios/spm-update-deps
 ---
 
 # spm-update
 
-`spm-update` (or `swift run spm-update` in this repo) reads `Package.swift` and `*.xcodeproj`
-and compares each dependency's version to its git tags.
+`spm-update` reads `Package.swift` and `*.xcodeproj` and compares each dependency's version
+to its git tags.
+
+## Setup
+Check for it with `spm-update --version`. If it is missing, install it, asking the user first:
+- `brew install apptekstudios/tap/spm-update` (macOS or Linux, when Homebrew is available);
+- otherwise `sh scripts/install.sh` from this skill's directory. It downloads the release
+  binary for this OS and CPU, checks it against the release's SHA256SUMS and installs it to
+  `~/.local/bin` (`SPM_UPDATE_INSTALL_DIR` changes that);
+- inside a clone of the spm-update repository, use `swift run spm-update` instead.
 
 ## Workflow
 1. **Find what's outdated** (TSV uses the fewest tokens):

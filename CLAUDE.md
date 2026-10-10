@@ -19,7 +19,9 @@ Sources/SPMUpdateCore/Apply.swift              # decision parsing, validation (a
 Sources/SPMUpdateCore/Output.swift             # table / tsv / json renderers (JSON written by hand: ordered keys)
 Sources/SPMUpdateCore/Interactive.swift        # termios prompts for -i and write confirmation
 Tests/SPMUpdateCoreTests/                      # XCTest; EndToEndTests runs the binary against local git repos
-.claude/skills/spm-update/SKILL.md             # how agents should use the CLI
+skills/spm-update/SKILL.md                     # the agent skill (Agent Skills format, published via skills.sh)
+skills/spm-update/scripts/install.sh           # installs the release binary (checksum-verified) when it is missing
+.claude/skills/spm-update                      # symlink to skills/spm-update, so Claude Code loads it in this repo
 ```
 
 ## Commands
@@ -57,6 +59,15 @@ If the `HOMEBREW_TAP_TOKEN` secret is set, the formula is also pushed to the tap
 `scripts/make-core-formula.sh` prints the homebrew-core style formula, which builds from source (homebrew-core does not take prebuilt binaries). The `homebrew-source` job in `ci.yml` installs it with `--build-from-source`, then runs `brew test`, `brew audit --strict`, `brew style` and `brew linkage --test` on macOS and Linux, so it is ready to submit to Homebrew/homebrew-core once the project meets Homebrew's notability bar.
 
 `build.yml` runs on every PR. It builds all three artifacts, runs each Linux binary on its own architecture, and installs the formula from the local tarballs with `brew install` + `brew test` on macOS and Linux. The static SDK pinned in `build.yml` must match the Swift image version.
+
+## Agent skill
+
+`skills/spm-update/` is published through [skills.sh](https://skills.sh): `npx skills add apptekstudios/spm-update-deps` copies the whole directory into the user's agent. Keep it self-contained, since it is installed into projects that don't have this repo:
+- `SKILL.md` follows the [Agent Skills spec](https://agentskills.io/specification). `name` must match the directory name, and `description` must stay under 1024 characters.
+- Keep it in sync with the CLI when flags or output change.
+- `scripts/install.sh` reads the release asset names (`spm-update-<v>-<target>.tar.gz`) and `SHA256SUMS`, so renaming either in `release.yml` breaks it.
+
+CI validates the skill with `skills-ref`, checks that `npx skills add` finds it, and runs `install.sh` against the built tarballs.
 
 ## Development
 
