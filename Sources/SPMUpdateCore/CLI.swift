@@ -1,6 +1,6 @@
 import Foundation
 
-public let toolVersion = "2.0.0"
+public let toolVersion = "1.0.0"
 
 enum Command: String, CaseIterable {
     case check, apply, update, interactive
