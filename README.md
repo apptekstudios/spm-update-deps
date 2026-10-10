@@ -17,15 +17,36 @@ projects (`.xcodeproj`). It works well for people at a terminal and for coding a
 
 ## Installation
 
-A single native binary (about 2 MB, nothing else to install) that needs `git` at runtime. Build it with Swift 5.9 or later:
+### Homebrew (macOS and Linux)
 
 ```bash
-git clone https://github.com/apptekstudios/spm-update-deps.git && cd spm-update-deps
-swift build -c release
-cp .build/release/spm-update /usr/local/bin/        # optional
+brew install apptekstudios/tap/spm-update
 ```
 
-Or with [Mint](https://github.com/yonaskolb/Mint): `mint install apptekstudios/spm-update-deps`. To build a universal macOS binary, use `swift build -c release --arch arm64 --arch x86_64`; it lands in `.build/apple/Products/Release/`.
+### Prebuilt binaries
+
+Each [release](https://github.com/apptekstudios/spm-update-deps/releases) has:
+
+| Asset | Runs on |
+|---|---|
+| `spm-update-<version>-macos-universal.tar.gz` | macOS 13+, Apple silicon and Intel |
+| `spm-update-<version>-linux-x86_64.tar.gz` | any x86_64 Linux: fully static, no Swift or libc requirements |
+| `spm-update-<version>-linux-aarch64.tar.gz` | any arm64 Linux, also fully static |
+
+```bash
+curl -L https://github.com/apptekstudios/spm-update-deps/releases/latest/download/spm-update-<version>-linux-x86_64.tar.gz | tar -xz
+./spm-update --version
+```
+
+At runtime the tool needs `git`, and on Linux also `curl`, on your `PATH`.
+
+### From source
+
+Requires Swift 5.9 or later.
+
+```bash
+swift build -c release            # .build/release/spm-update
+```
 
 ## Usage
 
