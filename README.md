@@ -1,5 +1,7 @@
 # spm-update
 
+[![skills.sh](https://skills.sh/b/apptekstudios/spm-update-deps)](https://skills.sh/apptekstudios/spm-update-deps)
+
 Check and update Swift Package Manager dependencies in `Package.swift` manifests and Xcode
 projects (`.xcodeproj`). It works well for people at a terminal and for coding agents.
 
@@ -162,7 +164,15 @@ A JSON dependency looks like this. The `inRange` field means the current require
 | 1 | usage or validation error; nothing was written |
 | 2 | outdated dependencies found (only with `--fail-on-outdated`) |
 
-[`.claude/skills/spm-update/SKILL.md`](.claude/skills/spm-update/SKILL.md) gives agents the full check → decide → apply recipe.
+### Agent skill
+
+[`skills/spm-update/SKILL.md`](skills/spm-update/SKILL.md) gives agents the full check → decide → apply recipe. It follows the [Agent Skills](https://agentskills.io) format, so it installs into Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot and the other agents listed on [skills.sh](https://skills.sh):
+
+```bash
+npx skills add apptekstudios/spm-update-deps
+```
+
+If the agent doesn't find `spm-update` installed, the skill tells it to install it, asking you first. It uses Homebrew when that's available; otherwise it runs the skill's `scripts/install.sh`, which downloads the release binary for the OS and CPU and checks it against the release's `SHA256SUMS`.
 
 ## Development
 
