@@ -2,6 +2,8 @@
   "compilerOptions": {
     // Environment setup & latest features
     "lib": ["ESNext"],
+    "types": ["bun"],
+    "resolveJsonModule": true,
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
