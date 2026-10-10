@@ -264,7 +264,7 @@ export function writeChanges(plan: Plan, manifests: Manifest[]): void {
           )
         : editXcodeProject(
             text,
-            items.map(({ c, change }) => ({ handle: c.dep.handle as XcodeHandle, next: change.to })),
+            items.map(({ c, change }) => ({ handle: c.dep.handle as XcodeHandle, name: change.name, next: change.to })),
           );
     outputs.push({ path: man.path, text: next });
   }

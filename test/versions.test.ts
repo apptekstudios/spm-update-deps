@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { analyze, parseLsRemote, targetVersion } from "../src/versions.ts";
-import { bumpRequirement, formatRequirement, satisfies } from "../src/requirement.ts";
+import { bumpRequirement, formatRequirement, sameRequirement, satisfies } from "../src/requirement.ts";
 import type { Dependency, Requirement } from "../src/types.ts";
 
 const LS_REMOTE = [
@@ -29,6 +29,12 @@ const dep = (req: Requirement): Dependency => ({
 describe("parseLsRemote", () => {
   test("normalizes v-prefixed and two-part tags, drops junk, sorts newest first", () => {
     expect(versions).toEqual(["2.1.0", "2.0.0", "2.0.0-beta.1", "1.2.3", "1.2.0", "1.1.0", "1.0.1", "1.0.0"]);
+  });
+
+  test("reads zero-padded calendar versions like SwiftPM", () => {
+    expect(parseLsRemote("a\trefs/tags/26.09.25\nb\trefs/tags/26.10.02")).toEqual(["26.10.2", "26.9.25"]);
+    const a = analyze(dep({ kind: "exact", version: "26.09.25" }), { version: "26.09.25" }, { versions: ["26.10.2", "26.9.25"] });
+    expect(a).toMatchObject({ status: "outdated", baseline: "26.9.25", minor: "26.10.2" });
   });
 });
 
@@ -66,6 +72,13 @@ describe("analyze", () => {
     expect(analyze(dep({ kind: "upToNextMajor", version: "2.1.0" }), undefined, tags, true).major).toBe("3.0.0-rc.1");
   });
 
+  test("a prerelease baseline sees later prereleases of the same version", () => {
+    const tags = { versions: ["5.1.0-alpha.1", "5.0.0-beta.3", "5.0.0-beta.1", "4.9.3"] };
+    const a = analyze(dep({ kind: "upToNextMajor", version: "5.0.0-beta" }), undefined, tags);
+    expect(a).toMatchObject({ status: "outdated", update: "patch", patch: "5.0.0-beta.3" });
+    expect(a.newer).toEqual(["5.0.0-beta.3", "5.0.0-beta.1"]);
+  });
+
   test("branch pins report the latest release", () => {
     const a = analyze(dep({ kind: "branch", ref: "main" }), undefined, { versions });
     expect(a).toMatchObject({ status: "pinned", latest: "2.1.0" });
@@ -88,6 +101,12 @@ describe("requirements", () => {
     expect(satisfies({ kind: "upToNextMinor", version: "1.2.0" }, "1.3.0")).toBe(false);
     expect(satisfies({ kind: "range", lower: "1.0.0", upper: "2.0.0", closed: false }, "2.0.0")).toBe(false);
     expect(satisfies({ kind: "range", lower: "1.0.0", upper: "2.0.0", closed: true }, "2.0.0")).toBe(true);
+  });
+
+  test("sameRequirement ignores spelling differences", () => {
+    expect(sameRequirement({ kind: "exact", version: "1.2" }, { kind: "exact", version: "1.2.0" })).toBe(true);
+    expect(sameRequirement({ kind: "exact", version: "26.09.25" }, { kind: "exact", version: "26.9.25" })).toBe(true);
+    expect(sameRequirement({ kind: "exact", version: "1.2.0" }, { kind: "upToNextMajor", version: "1.2.0" })).toBe(false);
   });
 
   test("bumpRequirement keeps the kind", () => {

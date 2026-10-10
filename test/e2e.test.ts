@@ -109,7 +109,7 @@ describe("check", () => {
       inRange: true,
       versions: ["2.0.0", "1.1.0"],
     });
-    expect(json.summary).toEqual({ total: 3, outdated: 2, major: 1, patch: 1, pinned: 1 });
+    expect(json.summary).toEqual({ manifests: 1, total: 3, outdated: 2, major: 1, patch: 1, pinned: 1 });
   });
 
   test("plain table has no ANSI codes when piped", async () => {
@@ -220,5 +220,32 @@ describe("update", () => {
     const after = readFileSync(join(dir, "App.xcodeproj/project.pbxproj"), "utf8");
     expect(after).toContain("version = 1.0.5;");
     expect(after).toContain("minimumVersion = 3.2.0;");
+  });
+});
+
+describe("large output", () => {
+  test("JSON over 64KB is not truncated when piped", async () => {
+    const dir = mkdtempSync(join(tmp, "big-"));
+    const lines = Array.from({ length: 600 }, () => `        .package(url: "${urls.Alpha}", from: "1.0.0"),`);
+    writeFileSync(join(dir, "Package.swift"), `let package = Package(name: "Big", dependencies: [\n${lines.join("\n")}\n])\n`);
+    // A slow reader on a shell pipe is what exposed truncation at the 64KB pipe buffer.
+    const proc = Bun.spawn(["sh", "-c", `bun "${CLI}" check "${dir}" --json --versions | (sleep 1; cat)`], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, SPM_UPDATE_CACHE_DIR: join(tmp, "cache"), NO_COLOR: "1", SPM_UPDATE_FORMAT: "" },
+    });
+    const out = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(out.length).toBeGreaterThan(65536);
+    expect(JSON.parse(out).deps).toHaveLength(600);
+  });
+});
+
+describe("relative URLs", () => {
+  test("url: \"../X\" is resolved against the manifest's folder, not the CWD", async () => {
+    const dir = mkdtempSync(join(tmp, "rel-"));
+    writeFileSync(join(dir, "Package.swift"), `let package = Package(name: "R", dependencies: [\n  .package(url: "../repos/Gamma.git", from: "3.0.0"),\n])\n`);
+    const r = await cli(["check", dir, "--tsv"]);
+    expect(r.out.split("\n").pop()).toBe("0\tGamma\t^3.0.0\t-\t-\t3.2.0\t-\tminor");
   });
 });

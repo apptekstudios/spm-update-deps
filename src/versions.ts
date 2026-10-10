@@ -150,15 +150,22 @@ export function analyze(
   if ("error" in tags) return { ...base, resolved, status: "error", err: tags.error };
 
   const all = tags.versions;
-  const candidates = includePrerelease ? all : all.filter((v) => !semver.prerelease(v));
-  const latest = candidates[0];
   const pinned = dep.req.kind === "branch" || dep.req.kind === "revision";
   // A resolved version outside the requirement means Package.resolved is stale; use the floor then.
   const floor = requirementFloor(dep.req) ?? undefined;
   const baseline = pinned ? undefined : resolved && satisfies(dep.req, resolved) ? resolved : floor;
+  // Prereleases are opt-in, except that a prerelease baseline (`from: "5.0.0-beta"`) already
+  // opts into later prereleases of that same version, as SwiftPM does.
+  const pre = baseline ? semver.parse(baseline) : null;
+  const candidates = all.filter((v) => {
+    if (includePrerelease || !semver.prerelease(v)) return true;
+    const p = semver.parse(v)!;
+    return !!pre?.prerelease.length && p.major === pre.major && p.minor === pre.minor && p.patch === pre.patch;
+  });
+  const latest = candidates[0];
 
   if (!baseline) {
-    return { ...base, all, resolved, latest, status: pinned ? "pinned" : "error", err: pinned ? undefined : "unrecognized requirement" };
+    return { ...base, all, resolved, latest, status: pinned ? "pinned" : "error", err: pinned ? undefined : "requirement uses a variable or unsupported syntax" };
   }
 
   const b = semver.parse(baseline)!;

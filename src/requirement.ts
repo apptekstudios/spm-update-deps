@@ -21,12 +21,14 @@ export function formatRequirement(req: Requirement): string {
   }
 }
 
-/** Normalizes a version string the way SwiftPM reads tags (`v` prefix, `1.2` → `1.2.0`). */
+/**
+ * Normalizes a version string the way SwiftPM reads tags: optional `v` prefix, `1.2` → `1.2.0`,
+ * and numeric components read as integers (`26.09.25` → `26.9.25`, used by calendar versioning).
+ */
 export function normalizeVersion(raw: string): string | null {
-  let s = raw.trim();
-  if (s.startsWith("v") || s.startsWith("V")) s = s.slice(1);
-  if (/^\d+\.\d+$/.test(s)) s = `${s}.0`;
-  return semver.valid(s);
+  const m = /^[vV]?(\d+)\.(\d+)(?:\.(\d+))?([-+].*)?$/.exec(String(raw).trim());
+  if (!m) return null;
+  return semver.valid(`${Number(m[1])}.${Number(m[2])}.${Number(m[3] ?? 0)}${m[4] ?? ""}`);
 }
 
 /** The version a requirement starts from, if any. */
@@ -94,6 +96,20 @@ export function bumpRequirement(current: Requirement, version: string, kind?: Ve
   }
 }
 
+/** Compares requirements by meaning, so `=1.2` and `=1.2.0` (or `26.09.25` and `26.9.25`) are equal. */
 export function sameRequirement(a: Requirement, b: Requirement): boolean {
-  return formatRequirement(a) === formatRequirement(b);
+  const norm = (v: string) => normalizeVersion(v) ?? v;
+  const canon = (r: Requirement): Requirement => {
+    switch (r.kind) {
+      case "upToNextMajor":
+      case "upToNextMinor":
+      case "exact":
+        return { ...r, version: norm(r.version) };
+      case "range":
+        return { ...r, lower: norm(r.lower), upper: norm(r.upper) };
+      default:
+        return r;
+    }
+  };
+  return formatRequirement(canon(a)) === formatRequirement(canon(b));
 }

@@ -129,6 +129,15 @@ describe("editPackageSwift", () => {
     expect(edit("From", { kind: "upToNextMinor", version: "1.4.0" })).toContain(`From.git", .upToNextMinor(from: "1.4.0")),`);
   });
 
+  test("keeps spacing inside ranges (firebase style)", () => {
+    const src = `.package(\n  url: "https://github.com/google/gtm-session-fetcher.git",\n  "4.0.0" ..< "6.0.0"\n),`;
+    const [d] = parsePackageSwift(src);
+    const out = editPackageSwift(src, [
+      { handle: d!.handle as PackageSwiftHandle, prev: d!.req, next: { kind: "range", lower: "4.5.0", upper: "6.0.0", closed: false } },
+    ]);
+    expect(out).toBe(`.package(\n  url: "https://github.com/google/gtm-session-fetcher.git",\n  "4.5.0" ..< "6.0.0"\n),`);
+  });
+
   test("applies several edits at once", () => {
     const a = deps.find((d) => d.name === "From")!;
     const b = deps.find((d) => d.name === "Minor")!;

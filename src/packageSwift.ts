@@ -248,11 +248,48 @@ export interface PackageSwiftEdit {
 }
 
 /** Applies requirement edits, touching only each requirement argument's text. */
+/** The string literals a requirement is written with, in source order. */
+function requirementLiterals(req: Requirement): string[] {
+  switch (req.kind) {
+    case "upToNextMajor":
+    case "upToNextMinor":
+    case "exact":
+      return [req.version];
+    case "range":
+      return [req.lower, req.upper];
+    case "branch":
+    case "revision":
+      return [req.ref];
+    case "unknown":
+      return [];
+  }
+}
+
+/**
+ * When the kind is unchanged, swaps just the version string literals so every bit of the
+ * author's formatting (spacing, comments, line breaks) survives. Returns null if that isn't possible.
+ */
+function swapLiterals(arg: string, prev: Requirement, next: Requirement): string | null {
+  if (prev.kind !== next.kind) return null;
+  const from = requirementLiterals(prev);
+  const to = requirementLiterals(next);
+  const spans = [...arg.matchAll(/"((?:[^"\\]|\\.)*)"/g)];
+  if (spans.length !== from.length || spans.some((m, i) => m[1] !== from[i])) return null;
+  let out = "";
+  let last = 0;
+  spans.forEach((m, i) => {
+    out += arg.slice(last, m.index) + `"${to[i]}"`;
+    last = m.index! + m[0].length;
+  });
+  return out + arg.slice(last);
+}
+
 export function editPackageSwift(src: string, edits: PackageSwiftEdit[]): string {
   const sorted = [...edits].sort((a, b) => b.handle.start - a.handle.start);
   let out = src;
   for (const e of sorted) {
-    const text = renderRequirementArg(e.next, e.handle.style, e.prev.kind);
+    const original = out.slice(e.handle.start, e.handle.end);
+    const text = swapLiterals(original, e.prev, e.next) ?? renderRequirementArg(e.next, e.handle.style, e.prev.kind);
     out = out.slice(0, e.handle.start) + text + out.slice(e.handle.end);
   }
   return out;

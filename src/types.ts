@@ -19,6 +19,8 @@ export interface Dependency {
   identity: string;
   source: SourceKind;
   url?: string;
+  /** Where to fetch tags from, when it differs from `url` (relative git URLs). */
+  fetchUrl?: string;
   req: Requirement;
   /** Opaque locator used by the manifest writer. */
   handle: unknown;

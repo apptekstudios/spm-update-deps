@@ -19,6 +19,13 @@ import {
 } from "./apply.ts";
 import { progressReporter, renderCheck, renderPlan, summarize, type Format, type Style } from "./output.ts";
 
+/** Writes to stdout and waits until the data is handed off, so piped output is never cut short. */
+function emit(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${text}\n`, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
 const COMMANDS = ["check", "apply", "update", "interactive"] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -303,7 +310,7 @@ export function parseArgs(argv: string[]): Args {
 }
 
 async function checkAll(manifests: Manifest[], args: Args, fetcher: TagFetcher): Promise<CheckedDep[]> {
-  const urls = manifests.flatMap((m) => m.deps.flatMap((d) => (d.source === "remote" && d.url ? [d.url] : [])));
+  const urls = manifests.flatMap((m) => m.deps.flatMap((d) => (d.source === "remote" && d.url ? [d.fetchUrl ?? d.url] : [])));
   const progress = progressReporter(!!process.stderr.isTTY && args.format === "table" && !args.quiet);
   const tags = await fetchAll(urls, fetcher, 8, (done, total) => progress.update(done, total));
   progress.clear();
@@ -311,7 +318,7 @@ async function checkAll(manifests: Manifest[], args: Args, fetcher: TagFetcher):
   manifests.forEach((man, m) => {
     const pins = readResolved(man.resolvedPath);
     for (const dep of man.deps) {
-      const a = analyze(dep, pins.get(dep.identity), dep.url ? tags.get(dep.url) : undefined, args.prerelease);
+      const a = analyze(dep, pins.get(dep.identity), dep.url ? tags.get(dep.fetchUrl ?? dep.url) : undefined, args.prerelease);
       checked.push({ m, dep, a });
     }
   });
@@ -333,27 +340,27 @@ async function finishPlan(plan: Plan, manifests: Manifest[], args: Args, style: 
   const canWrite = plan.errors.length === 0 && plan.changes.length > 0;
 
   if (canWrite && !args.dryRun && interactiveTerm && !args.yes) {
-    console.log(renderPlan(plan, manifests, { ...base, dryRun: true, footer: false }));
+    await emit(renderPlan(plan, manifests, { ...base, dryRun: true, footer: false }));
     const { confirmWrite } = await import("./interactive.ts");
     if (!(await confirmWrite(plan.changes.length))) {
-      console.log("Nothing written.");
+      await emit("Nothing written.");
       return 0;
     }
     writeChanges(plan, manifests);
-    console.log(renderPlan(plan, manifests, { ...base, dryRun: false, list: false }));
+    await emit(renderPlan(plan, manifests, { ...base, dryRun: false, list: false }));
     return 0;
   }
 
   if (canWrite && !args.dryRun) writeChanges(plan, manifests);
   const text = renderPlan(plan, manifests, { ...base, dryRun: args.dryRun });
-  if (text) console.log(text);
+  if (text) await emit(text);
   return plan.errors.length ? 1 : 0;
 }
 
 async function run(argv: string[]): Promise<number> {
   const args = parseArgs(argv);
   if (args.help) {
-    console.log(args.helpTopic ? COMMAND_HELP[args.helpTopic] : HELP);
+    await emit(args.helpTopic ? COMMAND_HELP[args.helpTopic] : HELP);
     return 0;
   }
   const style: Style = { color: !!process.stdout.isTTY && !process.env.NO_COLOR && args.format === "table" };
@@ -381,7 +388,7 @@ async function run(argv: string[]): Promise<number> {
   switch (args.command) {
     case "check": {
       const shown = args.outdated ? checked.filter((c) => c.a.status === "outdated" || c.a.status === "error") : checked;
-      console.log(
+      await emit(
         renderCheck(root, manifests, checked, shown, {
           format: args.format,
           style,
@@ -406,8 +413,12 @@ async function run(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) {
+  // Set exitCode rather than calling process.exit(): exiting immediately truncates
+  // output that is still buffered for a pipe (large --json results).
   run(Bun.argv.slice(2)).then(
-    (code) => process.exit(code),
+    (code) => {
+      process.exitCode = code;
+    },
     (err) => {
       if (err instanceof UsageError) {
         console.error(`error: ${err.message}`);
@@ -415,7 +426,7 @@ if (import.meta.main) {
       } else {
         console.error(`error: ${(err as Error).message ?? err}`);
       }
-      process.exit(1);
+      process.exitCode = 1;
     },
   );
 }

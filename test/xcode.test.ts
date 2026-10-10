@@ -23,9 +23,9 @@ describe("xcode", () => {
 
   test("edits only the requirement block", () => {
     const out = editXcodeProject(PBX, [
-      { handle: byName("Alamofire").handle as XcodeHandle, next: { kind: "upToNextMajor", version: "5.9.0" } },
-      { handle: byName("swift-log").handle as XcodeHandle, next: { kind: "range", lower: "1.5.0", upper: "2.0.0", closed: false } },
-      { handle: byName("swift-argument-parser").handle as XcodeHandle, next: { kind: "upToNextMinor", version: "1.3.0" } },
+      { handle: byName("Alamofire").handle as XcodeHandle, name: "Alamofire", next: { kind: "upToNextMajor", version: "5.9.0" } },
+      { handle: byName("swift-log").handle as XcodeHandle, name: "swift-log", next: { kind: "range", lower: "1.5.0", upper: "2.0.0", closed: false } },
+      { handle: byName("swift-argument-parser").handle as XcodeHandle, name: "swift-argument-parser", next: { kind: "upToNextMinor", version: "1.3.0" } },
     ]);
     const before = PBX.split("\n");
     const after = out.split("\n");
@@ -43,9 +43,23 @@ describe("xcode", () => {
 
   test("quotes values that need it", () => {
     const out = editXcodeProject(PBX, [
-      { handle: byName("Alamofire").handle as XcodeHandle, next: { kind: "branch", ref: "feature-x" } },
+      { handle: byName("Alamofire").handle as XcodeHandle, name: "Alamofire", next: { kind: "branch", ref: "feature-x" } },
     ]);
     expect(out).toContain('branch = "feature-x";');
     expect(formatRequirement(parseXcodeProject(out).find((d) => d.name === "Alamofire")!.req)).toBe("branch:feature-x");
+  });
+
+  test("keeps numeric-looking versions as written (1.10 is not 1.1)", () => {
+    // Real projects contain unquoted `version = 1.2;`, which a JSON parser reads as a number.
+    const pbx = PBX.replace("version = 7.0.0;", "version = 1.10;").replace("minimumVersion = 5.0.0;", "minimumVersion = 2.0;");
+    const parsed = parseXcodeProject(pbx);
+    expect(formatRequirement(parsed.find((d) => d.name === "Kingfisher")!.req)).toBe("=1.10");
+    expect(formatRequirement(parsed.find((d) => d.name === "Alamofire")!.req)).toBe("^2.0");
+  });
+
+  test("unlocatable blocks throw instead of re-serializing", () => {
+    expect(() =>
+      editXcodeProject(PBX, [{ handle: { id: "DOESNOTEXIST" }, name: "Ghost", next: { kind: "exact", version: "1.0.0" } }]),
+    ).toThrow("can't locate the requirement block for Ghost");
   });
 });

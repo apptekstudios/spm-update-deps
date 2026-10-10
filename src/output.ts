@@ -97,15 +97,21 @@ function statusToken(c: CheckedDep): string {
 
 export function renderCheck(root: string, manifests: Manifest[], all: CheckedDep[], shown: CheckedDep[], o: CheckOptions): string {
   const summary = summarize(all);
+  // Machine formats list only the manifests that have rows (renumbered), so scanning a repo
+  // full of fixtures doesn't cost a line per manifest. The scanned count goes in the summary.
+  const used = [...new Set(shown.map((c) => c.m))].sort((x, y) => x - y);
+  const remap = new Map(used.map((m, i) => [m, i]));
+  const listed = used.map((i) => manifests[i]!);
+  const rows = shown.map((c) => ({ ...c, m: remap.get(c.m)! }));
   if (o.format === "json") {
     return json(
       {
         v: 1,
         root,
-        manifests: manifests.map((m) =>
+        manifests: listed.map((m) =>
           compact({ path: m.label, type: m.type, resolved: m.resolvedPath ? relative(root, m.resolvedPath) : undefined }),
         ),
-        deps: shown.map(({ m, dep, a }) =>
+        deps: rows.map(({ m, dep, a }) =>
           compact({
             m,
             name: dep.name,
@@ -123,18 +129,18 @@ export function renderCheck(root: string, manifests: Manifest[], all: CheckedDep
             versions: o.versions > 0 ? a.newer.slice(0, o.versions) : undefined,
           }),
         ),
-        summary: compact({ ...summary, major: summary.major || undefined, minor: summary.minor || undefined, patch: summary.patch || undefined, pinned: summary.pinned || undefined, error: summary.error || undefined }),
+        summary: compact({ manifests: manifests.length, ...summary, major: summary.major || undefined, minor: summary.minor || undefined, patch: summary.patch || undefined, pinned: summary.pinned || undefined, error: summary.error || undefined }),
       },
       o.pretty,
     );
   }
-  if (o.format === "tsv") return renderCheckTsv(manifests, shown, o);
+  if (o.format === "tsv") return renderCheckTsv(listed, rows, o);
   return renderCheckTable(manifests, shown, summary, o);
 }
 
 function renderCheckTsv(manifests: Manifest[], shown: CheckedDep[], o: CheckOptions): string {
   const lines: string[] = [];
-  lines.push(manifests.map((m, i) => `#${i} ${m.label}`).join("\t"));
+  if (manifests.length) lines.push(manifests.map((m, i) => `#${i} ${m.label}`).join("\t"));
   const head = ["m", "pkg", "req", "resolved", "patch", "minor", "major", "status"];
   if (o.urls) head.push("url");
   if (o.versions > 0) head.push("versions");

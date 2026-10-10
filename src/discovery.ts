@@ -85,6 +85,10 @@ export function findManifestFiles(target: string, recursive: boolean): { root: s
 export function loadManifest(root: string, f: Found): Manifest {
   const text = readFileSync(f.path, "utf8");
   const deps = f.type === "package" ? parsePackageSwift(text) : parseXcodeProject(text);
+  for (const d of deps) {
+    // SwiftPM resolves relative source-control URLs (`url: "../Foo"`) against the manifest's folder.
+    if (d.url && /^\.{1,2}\//.test(d.url)) d.fetchUrl = resolve(dirname(f.path), d.url);
+  }
   const labelPath = f.type === "xcodeproj" ? dirname(f.path) : f.path;
   return {
     path: f.path,
