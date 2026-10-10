@@ -87,6 +87,11 @@ describe("planDecisions", () => {
     ]);
   });
 
+  test("a manifest filter that excludes the package says where it is", () => {
+    const plan = planDecisions(deps, manifests, [{ ...parseDecisionArg("Beta@patch"), manifest: "App.xcodeproj" }], false);
+    expect(plan.errors).toEqual(["'Beta' is not in App.xcodeproj (found in Package.swift)"]);
+  });
+
   test("--force allows unknown tags and downgrades", () => {
     const plan = planDecisions(deps, manifests, [parseDecisionArg("Beta@2.0.0")], true);
     expect(fmtChanges(plan)).toEqual(["Beta =2.3.1 -> =2.0.0"]);

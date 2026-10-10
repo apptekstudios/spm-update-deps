@@ -62,38 +62,63 @@ function isIdentChar(c: string | undefined): boolean {
 }
 
 /** Splits the arguments of a call whose `(` is at `open`. Returns args and the index of the closing `)`. */
+function isComment(src: string, i: number): boolean {
+  return src.startsWith("//", i) || src.startsWith("/*", i);
+}
+
+/** Removes comments (but not string contents) from a code fragment. */
+function stripComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const j = skipTrivia(text, i);
+    if (j !== i) {
+      if (!isComment(text, i)) out += text.slice(i, j);
+      else out += " ";
+      i = j;
+    } else out += text[i++];
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
 function splitArgs(src: string, open: number): { args: Arg[]; close: number } | null {
   const args: Arg[] = [];
   let depth = 0;
-  let argStart = open + 1;
+  // Span of code (not whitespace or comments) in the current argument, so edits never eat comments.
+  let codeStart = -1;
+  let codeEnd = -1;
   let i = open + 1;
-  const push = (end: number) => {
-    const raw = src.slice(argStart, end);
-    const lead = raw.length - raw.trimStart().length;
-    const text = raw.trim();
-    if (!text) return;
-    const start = argStart + lead;
-    const label = text.match(/^([A-Za-z_]\w*)\s*:/)?.[1];
-    args.push({ start, end: start + text.length, text, label });
+  const mark = (from: number, to: number) => {
+    if (codeStart === -1) codeStart = from;
+    codeEnd = to;
+  };
+  const push = () => {
+    if (codeStart !== -1) {
+      const text = stripComments(src.slice(codeStart, codeEnd));
+      const label = text.match(/^([A-Za-z_]\w*)\s*:/)?.[1];
+      args.push({ start: codeStart, end: codeEnd, text, label });
+    }
+    codeStart = codeEnd = -1;
   };
   while (i < src.length) {
     const j = skipTrivia(src, i);
     if (j !== i) {
+      if (!isComment(src, i)) mark(i, j); // string literal
       i = j;
       continue;
     }
-    const c = src[i];
+    const c = src[i]!;
+    if (!/\s/.test(c) && !(depth === 0 && (c === "," || c === ")"))) mark(i, i + 1);
     if (c === "(" || c === "[" || c === "{") depth++;
     else if (c === ")" || c === "]" || c === "}") {
       if (depth === 0) {
         if (c !== ")") return null;
-        push(i);
+        push();
         return { args, close: i };
       }
       depth--;
     } else if (c === "," && depth === 0) {
-      push(i);
-      argStart = i + 1;
+      push();
     }
     i++;
   }

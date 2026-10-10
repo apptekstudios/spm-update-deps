@@ -66,6 +66,33 @@ describe("parsePackageSwift", () => {
   });
 });
 
+describe("comments inside calls", () => {
+  // Shape seen in a real manifest: a trailing comment after the requirement.
+  const src = `let package = Package(dependencies: [
+\t.package(
+\t\turl: "https://github.com/apple/swift-algorithms.git", // pinned for Foo
+\t\t.upToNextMajor(from: "1.1.0") // or \`.upToNextMajor(from: "1.2.0")\`
+\t),
+\t.package(url: "https://github.com/a/B.git", /* min */ from: "2.0.0"),
+])`;
+
+  test("parse ignores comments around arguments", () => {
+    const deps = parsePackageSwift(src);
+    expect(deps.map((d) => formatRequirement(d.req))).toEqual(["^1.1.0", "^2.0.0"]);
+  });
+
+  test("edits keep the comments", () => {
+    const deps = parsePackageSwift(src);
+    const out = editPackageSwift(
+      src,
+      deps.map((d) => ({ handle: d.handle as PackageSwiftHandle, prev: d.req, next: { kind: "upToNextMajor" as const, version: "9.9.9" } })),
+    );
+    expect(out).toContain(`.upToNextMajor(from: "9.9.9") // or \`.upToNextMajor(from: "1.2.0")\``);
+    expect(out).toContain(`/* min */ from: "9.9.9"),`);
+    expect(out).toContain("// pinned for Foo");
+  });
+});
+
 describe("editPackageSwift", () => {
   const deps = parsePackageSwift(MANIFEST);
   const edit = (name: string, next: Requirement) => {

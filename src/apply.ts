@@ -177,6 +177,12 @@ export function planDecisions(checked: CheckedDep[], manifests: Manifest[], deci
   for (const d of decisions) {
     const hits = checked.filter((c) => matches(c, d, manifests));
     if (hits.length === 0) {
+      const elsewhere = d.manifest ? checked.filter((c) => matches(c, { ...d, manifest: undefined }, manifests)) : [];
+      if (elsewhere.length > 0) {
+        const where = [...new Set(elsewhere.map((c) => manifests[c.m]!.label))].join(", ");
+        plan.errors.push(`'${d.selector}' is not in ${d.manifest} (found in ${where})`);
+        continue;
+      }
       const hint = suggest(d.selector, checked.map((c) => c.dep.name));
       plan.errors.push(`unknown package '${d.selector}'${d.manifest ? ` in ${d.manifest}` : ""}${hint ? ` (did you mean ${hint}?)` : ""}`);
       continue;
