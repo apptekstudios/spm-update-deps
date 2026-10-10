@@ -1,0 +1,151 @@
+# Builds the release tarballs and proves they install: macOS universal + fully static Linux
+# x86_64/aarch64 binaries, each run on its own architecture, then installed through the generated
+# Homebrew formula (from local files) with `brew test` on macOS and Linux.
+# Called by ci.yml (every PR) and release.yml (tags).
+name: Build release artifacts
+
+on:
+  workflow_call:
+    outputs:
+      version:
+        description: The version in Sources/SPMUpdateCore/CLI.swift
+        value: ${{ jobs.version.outputs.version }}
+
+env:
+  # The Static Linux SDK must match the toolchain in the linux job's container image exactly.
+  STATIC_SDK_URL: https://download.swift.org/swift-6.4.0-release/static-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_static-linux-0.1.0.artifactbundle.tar.gz
+  STATIC_SDK_CHECKSUM: 47d2fd89eebfdf9eb4d536b6710414297f755c17926cdebc4742c08982b40a9e
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(sed -n 's/^public let toolVersion = "\(.*\)"/\1/p' Sources/SPMUpdateCore/CLI.swift)" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: version
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          mkdir -p stage dist
+          cp .build/apple/Products/Release/spm-update stage/
+          strip -rSTx stage/spm-update
+          # strip invalidates the ad-hoc signature that arm64 binaries need to launch.
+          codesign --force --sign - stage/spm-update
+          lipo -info stage/spm-update
+          stage/spm-update --version
+          tar -C stage -czf "dist/spm-update-$VERSION-macos-universal.tar.gz" spm-update
+          ls -l stage/spm-update dist/
+      - name: Smoke test against GitHub
+        run: |
+          mkdir sample && cat > sample/Package.swift <<'SWIFT'
+          // swift-tools-version:5.9
+          import PackageDescription
+          let package = Package(name: "Sample", dependencies: [
+              .package(url: "https://github.com/apple/swift-log.git", from: "1.4.0"),
+          ])
+          SWIFT
+          stage/spm-update check sample --tsv --no-cache | tee out.tsv
+          grep -q "swift-log" out.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos
+          path: dist/*.tar.gz
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    container: swift:6.4.0-noble
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Static Linux SDK
+        run: swift sdk install "$STATIC_SDK_URL" --checksum "$STATIC_SDK_CHECKSUM"
+      - name: Build static binaries
+        run: |
+          mkdir -p dist
+          for arch in x86_64 aarch64; do
+            swift build -c release --swift-sdk "$arch-swift-linux-musl" -Xlinker -s
+            out=$(swift build -c release --swift-sdk "$arch-swift-linux-musl" -Xlinker -s --show-bin-path)
+            tar -C "$out" -czf "dist/spm-update-$VERSION-linux-$arch.tar.gz" spm-update
+            ls -l "$out/spm-update"
+          done
+          ls -l dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: dist/*.tar.gz
+
+  # Run each Linux binary on its own architecture, on a bare runner with no Swift installed.
+  verify-linux:
+    needs: [version, linux]
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-linux
+          path: dist
+      - name: Run
+        run: |
+          tar -xzf "dist/spm-update-${{ needs.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz"
+          file spm-update
+          ./spm-update --version
+          mkdir sample && cat > sample/Package.swift <<'SWIFT'
+          // swift-tools-version:5.9
+          import PackageDescription
+          let package = Package(name: "Sample", dependencies: [
+              .package(url: "https://github.com/apple/swift-log.git", from: "1.4.0"),
+          ])
+          SWIFT
+          ./spm-update check sample --tsv --no-cache | tee out.tsv
+          grep -q "swift-log" out.tsv
+
+  homebrew:
+    needs: [version, macos, linux]
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Install via the formula (from local tarballs)
+        run: |
+          [ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          scripts/make-formula.sh "$VERSION" "file://$PWD/dist" dist > spm-update.rb
+          cat spm-update.rb
+          brew tap-new --no-git local/spm-update
+          cp spm-update.rb "$(brew --repository)/Library/Taps/local/homebrew-spm-update/Formula/"
+          brew install local/spm-update/spm-update
+          brew test local/spm-update/spm-update
+          spm-update --version
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'macos-15'
+        with:
+          name: formula-local
+          path: spm-update.rb
