@@ -176,4 +176,4 @@ CI builds and tests on macOS and Linux, and reports the release binary's size.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

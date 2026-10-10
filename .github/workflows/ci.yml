@@ -25,3 +25,30 @@ jobs:
   # The release build, including the Homebrew install test, on every PR.
   build:
     uses: ./.github/workflows/build.yml
+
+  # The homebrew-core style formula (builds from source), checked the way Homebrew's CI would.
+  homebrew-source:
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and audit from source
+        run: |
+          [ -x /home/linuxbrew/.linuxbrew/bin/brew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          version=$(sed -n 's/^public let toolVersion = "\(.*\)"/\1/p' Sources/SPMUpdateCore/CLI.swift)
+          # Named like GitHub's tag archive, so Homebrew reads the version from the URL.
+          mkdir -p src && git archive --prefix="spm-update-deps-$version/" -o "src/v$version.tar.gz" HEAD
+          scripts/make-core-formula.sh "$version" "file://$PWD/src/v$version.tar.gz" "src/v$version.tar.gz" > spm-update.rb
+          cat spm-update.rb
+          brew tap-new --no-git local/spm-update-core
+          cp spm-update.rb "$(brew --repository)/Library/Taps/local/homebrew-spm-update-core/Formula/"
+          brew install --build-from-source local/spm-update-core/spm-update
+          brew test local/spm-update-core/spm-update
+          brew audit --strict local/spm-update-core/spm-update
+          brew style local/spm-update-core/spm-update
+          brew linkage --test local/spm-update-core/spm-update

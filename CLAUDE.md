@@ -54,6 +54,8 @@ swift build -c release       # release binary: .build/release/spm-update
 
 If the `HOMEBREW_TAP_TOKEN` secret is set, the formula is also pushed to the tap repo (the `HOMEBREW_TAP` variable, default `apptekstudios/homebrew-tap`).
 
+`scripts/make-core-formula.sh` prints the homebrew-core style formula, which builds from source (homebrew-core does not take prebuilt binaries). The `homebrew-source` job in `ci.yml` installs it with `--build-from-source`, then runs `brew test`, `brew audit --strict`, `brew style` and `brew linkage --test` on macOS and Linux, so it is ready to submit to Homebrew/homebrew-core once the project meets Homebrew's notability bar.
+
 `build.yml` runs on every PR. It builds all three artifacts, runs each Linux binary on its own architecture, and installs the formula from the local tarballs with `brew install` + `brew test` on macOS and Linux. The static SDK pinned in `build.yml` must match the Swift image version.
 
 ## Development
