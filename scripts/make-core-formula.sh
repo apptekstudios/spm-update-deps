@@ -25,9 +25,12 @@ class SpmUpdate < Formula
   license "MIT"
 
   depends_on xcode: ["15.0", :build]
-  depends_on macos: :ventura
 
   uses_from_macos "swift" => :build
+
+  on_macos do
+    depends_on macos: :ventura
+  end
 
   deny_network_access!
 
