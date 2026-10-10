@@ -6,7 +6,7 @@ import pkg from "../package.json" with { type: "json" };
 import type { CheckedDep, Level, Manifest } from "./types.ts";
 import { loadManifests, UsageError } from "./discovery.ts";
 import { readResolved } from "./resolved.ts";
-import { analyze, cachedFetcher, fetchAll, gitTagFetcher, type TagFetcher } from "./versions.ts";
+import { analyze, cachedFetcher, fetchAll, tagFetcher, type TagFetcher } from "./versions.ts";
 import {
   parseDecisionArg,
   parsePlanFile,
@@ -48,7 +48,8 @@ Common options:
   --json                    same as --format json  (--pretty to indent)
   -r, --recursive           search subfolders for manifests
   --no-cache                don't reuse version lookups from the last 10 minutes
-  --timeout <s>             per-repository git timeout (default 30)
+  --timeout <s>             per-repository lookup timeout (default 30)
+  -j, --jobs <n>            repositories looked up in parallel (default 16)
 
 check:  --outdated  --versions[=N]  --urls  --include-prerelease  --fail-on-outdated
 apply:  --plan <file|->  --manifest <path>  --dry-run  --force  -y  -q
@@ -112,6 +113,7 @@ interface Args {
   recursive: boolean;
   cache: boolean;
   timeout: number;
+  jobs: number;
   outdated: boolean;
   versions: number;
   urls: boolean;
@@ -150,6 +152,7 @@ export function parseArgs(argv: string[]): Args {
     recursive: false,
     cache: true,
     timeout: 30,
+    jobs: 16,
     outdated: false,
     versions: 0,
     urls: false,
@@ -210,6 +213,13 @@ export function parseArgs(argv: string[]): Args {
         const n = Number(value());
         if (!(n > 0)) throw new UsageError("--timeout must be a positive number of seconds");
         a.timeout = n;
+        break;
+      }
+      case "-j":
+      case "--jobs": {
+        const n = Number(value());
+        if (!Number.isInteger(n) || n < 1) throw new UsageError("--jobs must be a whole number of at least 1");
+        a.jobs = n;
         break;
       }
       case "--outdated":
@@ -312,7 +322,7 @@ export function parseArgs(argv: string[]): Args {
 async function checkAll(manifests: Manifest[], args: Args, fetcher: TagFetcher): Promise<CheckedDep[]> {
   const urls = manifests.flatMap((m) => m.deps.flatMap((d) => (d.source === "remote" && d.url ? [d.fetchUrl ?? d.url] : [])));
   const progress = progressReporter(!!process.stderr.isTTY && args.format === "table" && !args.quiet);
-  const tags = await fetchAll(urls, fetcher, 8, (done, total) => progress.update(done, total));
+  const tags = await fetchAll(urls, fetcher, args.jobs, (done, total) => progress.update(done, total));
   progress.clear();
   const checked: CheckedDep[] = [];
   manifests.forEach((man, m) => {
@@ -376,11 +386,11 @@ async function run(argv: string[]): Promise<number> {
   }
 
   const { root, manifests } = loadManifests(args.path, args.recursive);
-  const git = gitTagFetcher(args.timeout);
-  const cached = args.cache ? cachedFetcher(git, 600) : undefined;
+  const live = tagFetcher(args.timeout);
+  const cached = args.cache ? cachedFetcher(live, 600) : undefined;
   let checked: CheckedDep[];
   try {
-    checked = await checkAll(manifests, args, cached ?? git);
+    checked = await checkAll(manifests, args, cached ?? live);
   } finally {
     cached?.flush();
   }

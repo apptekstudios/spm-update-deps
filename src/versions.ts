@@ -9,16 +9,89 @@ import type { Pin } from "./resolved.ts";
 export type TagResult = { versions: string[] } | { error: string };
 export type TagFetcher = (url: string) => Promise<TagResult>;
 
-/** Extracts SwiftPM-compatible versions from `git ls-remote --tags` output. */
-export function parseLsRemote(stdout: string): string[] {
+/** Extracts SwiftPM-compatible versions from tag refs (`<oid> refs/tags/<name>` lines, tab or space separated). */
+export function versionsFromRefs(refs: string[]): string[] {
   const out = new Set<string>();
-  for (const line of stdout.split("\n")) {
-    const ref = line.split("\t")[1];
+  for (const line of refs) {
+    const ref = line.split(/[\t ]/)[1];
     if (!ref?.startsWith("refs/tags/") || ref.endsWith("^{}")) continue;
     const v = normalizeVersion(ref.slice("refs/tags/".length));
     if (v) out.add(v);
   }
   return [...out].sort(semver.rcompare);
+}
+
+/** Extracts SwiftPM-compatible versions from `git ls-remote --tags` output. */
+export function parseLsRemote(stdout: string): string[] {
+  return versionsFromRefs(stdout.split("\n"));
+}
+
+// --- git protocol v2 over HTTP ------------------------------------------------
+
+const pkt = (s: string) => (s.length + 4).toString(16).padStart(4, "0") + s;
+const LS_REFS_BODY =
+  pkt("command=ls-refs\n") + pkt("agent=spm-update\n") + pkt("object-format=sha1\n") + "0001" + pkt("ref-prefix refs/tags/\n") + "0000";
+
+/** Splits a pkt-line stream into its data lines; returns null if it isn't a clean ref listing. */
+export function parseLsRefsResponse(body: string): string[] | null {
+  const refs: string[] = [];
+  let i = 0;
+  while (i < body.length) {
+    const len = parseInt(body.slice(i, i + 4), 16);
+    if (Number.isNaN(len)) return null;
+    if (len < 4) {
+      i += 4; // flush (0000) / delimiter (0001) / response-end (0002)
+      continue;
+    }
+    const line = body.slice(i + 4, i + len).replace(/\n$/, "");
+    if (!/^[0-9a-f]{40,64} refs\/tags\//.test(line)) return null; // e.g. "ERR ..." from the server
+    refs.push(line);
+    i += len;
+  }
+  return refs;
+}
+
+type HttpResult = TagResult | { fallback: string };
+
+/**
+ * Lists tags with a single `ls-refs` request (git protocol v2 over smart HTTP), skipping the
+ * `git` process and the capability round trip. Anything unexpected (auth, old servers, odd
+ * responses) is reported as `fallback` so the caller can retry with `git ls-remote`.
+ */
+async function httpLsRefs(url: string, timeoutSec: number): Promise<HttpResult> {
+  try {
+    const res = await fetch(`${url.replace(/\/+$/, "")}/git-upload-pack`, {
+      method: "POST",
+      body: LS_REFS_BODY,
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+        Accept: "application/x-git-upload-pack-result",
+        "Git-Protocol": "version=2",
+      },
+      signal: AbortSignal.timeout(timeoutSec * 1000),
+    });
+    if (res.status !== 200 || !res.headers.get("content-type")?.includes("git-upload-pack-result")) {
+      await res.body?.cancel();
+      return { fallback: `http ${res.status}` };
+    }
+    const refs = parseLsRefsResponse(await res.text());
+    return refs ? { versions: versionsFromRefs(refs) } : { fallback: "unexpected response" };
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") return { error: `timed out after ${timeoutSec}s` };
+    return { fallback: (e as Error).message };
+  }
+}
+
+/** HTTP(S) URLs use a direct `ls-refs` request; everything else, and any HTTP failure, uses `git ls-remote`. */
+export function tagFetcher(timeoutSec: number): TagFetcher {
+  const git = gitTagFetcher(timeoutSec);
+  return async (url) => {
+    if (/^https?:\/\//i.test(url) && !process.env.SPM_UPDATE_GIT_ONLY) {
+      const r = await httpLsRefs(url, timeoutSec);
+      if (!("fallback" in r)) return r;
+    }
+    return git(url);
+  };
 }
 
 function summarizeGitError(stderr: string, code: number | null): string {
@@ -60,7 +133,10 @@ export function gitTagFetcher(timeoutSec: number): TagFetcher {
 
 // --- cache -----------------------------------------------------------------
 
-type CacheFile = Record<string, { t: number; v: string[] }>;
+type CacheFile = Record<string, { t: number; v?: string[]; e?: string }>;
+
+/** Failures that won't change in the next few minutes; timeouts and network errors are retried. */
+const STABLE_ERRORS = new Set(["repository not found", "auth required or repo not found"]);
 
 export function cacheDir(): string {
   return (
@@ -80,10 +156,13 @@ export function cachedFetcher(inner: TagFetcher, ttlSec: number): TagFetcher & {
   const now = Date.now();
   const fetcher = (async (url: string) => {
     const hit = cache[url];
-    if (hit && now - hit.t < ttlSec * 1000) return { versions: hit.v };
+    if (hit && now - hit.t < ttlSec * 1000) return hit.v ? { versions: hit.v } : { error: hit.e ?? "error" };
     const res = await inner(url);
     if ("versions" in res) {
       cache[url] = { t: Date.now(), v: res.versions };
+      dirty = true;
+    } else if (STABLE_ERRORS.has(res.error)) {
+      cache[url] = { t: Date.now(), e: res.error };
       dirty = true;
     }
     return res;
@@ -107,7 +186,7 @@ export function cachedFetcher(inner: TagFetcher, ttlSec: number): TagFetcher & {
 export async function fetchAll(
   urls: string[],
   fetcher: TagFetcher,
-  concurrency = 8,
+  concurrency = 16,
   onProgress?: (done: number, total: number) => void,
 ): Promise<Map<string, TagResult>> {
   const unique = [...new Set(urls)];
@@ -131,6 +210,12 @@ export async function fetchAll(
 
 // --- analysis --------------------------------------------------------------
 
+/** `5.0.0-beta.2` → `5.0.0`. */
+function releaseOf(version: string): string {
+  const v = semver.parse(version)!;
+  return `${v.major}.${v.minor}.${v.patch}`;
+}
+
 function newestWhere(versions: string[], pred: (v: semver.SemVer) => boolean): string | undefined {
   // `versions` is sorted newest first.
   return versions.find((v) => pred(semver.parse(v)!));
@@ -153,7 +238,15 @@ export function analyze(
   const pinned = dep.req.kind === "branch" || dep.req.kind === "revision";
   // A resolved version outside the requirement means Package.resolved is stale; use the floor then.
   const floor = requirementFloor(dep.req) ?? undefined;
-  const baseline = pinned ? undefined : resolved && satisfies(dep.req, resolved) ? resolved : floor;
+  // A requirement still on a prerelease (`from: "5.0.0-beta"`) whose release is out is compared from
+  // that floor, even if Package.resolved already picked the release up, so the move off beta/rc is flagged.
+  const floorAwaitsRelease =
+    !!floor && !!semver.prerelease(floor) && all.some((v) => !semver.prerelease(v) && semver.gte(v, releaseOf(floor)));
+  const baseline = pinned
+    ? undefined
+    : !floorAwaitsRelease && resolved && satisfies(dep.req, resolved)
+      ? resolved
+      : floor;
   // Prereleases are opt-in, except that a prerelease baseline (`from: "5.0.0-beta"`) already
   // opts into later prereleases of that same version, as SwiftPM does.
   const pre = baseline ? semver.parse(baseline) : null;

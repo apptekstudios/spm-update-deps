@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { analyze, parseLsRemote, targetVersion } from "../src/versions.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { analyze, cachedFetcher, parseLsRefsResponse, parseLsRemote, tagFetcher, targetVersion } from "../src/versions.ts";
 import { bumpRequirement, formatRequirement, sameRequirement, satisfies } from "../src/requirement.ts";
 import type { Dependency, Requirement } from "../src/types.ts";
 
@@ -79,6 +82,31 @@ describe("analyze", () => {
     expect(a.newer).toEqual(["5.0.0-beta.3", "5.0.0-beta.1"]);
   });
 
+  describe("prerelease → release", () => {
+    const req = { kind: "upToNextMajor", version: "5.0.0-beta" } as const;
+
+    test("flags the release even when Package.resolved already has it", () => {
+      const a = analyze(dep(req), { version: "5.0.0" }, { versions: ["5.0.1", "5.0.0", "5.0.0-beta.3", "5.0.0-beta"] });
+      expect(a).toMatchObject({ status: "outdated", update: "patch", baseline: "5.0.0-beta", patch: "5.0.1" });
+      expect(targetVersion(a, "patch")).toBe("5.0.1");
+    });
+
+    test("prefers the release over a later rc of the same version", () => {
+      const a = analyze(dep(req), { version: "5.0.0-rc.1" }, { versions: ["5.0.0", "5.0.0-rc.2", "5.0.0-rc.1"] });
+      expect(a).toMatchObject({ status: "outdated", baseline: "5.0.0-beta", patch: "5.0.0" });
+    });
+
+    test("stays on prereleases until a release exists", () => {
+      const a = analyze(dep(req), { version: "5.0.0-beta.2" }, { versions: ["5.0.0-rc.1", "5.0.0-beta.2", "4.9.0"] });
+      expect(a).toMatchObject({ baseline: "5.0.0-beta.2", patch: "5.0.0-rc.1" });
+    });
+
+    test("with --include-prerelease, a release beats its own rc", () => {
+      const a = analyze(dep({ kind: "upToNextMajor", version: "1.0.0" }), undefined, { versions: ["1.1.0", "1.1.0-rc.1"] }, true);
+      expect(a.minor).toBe("1.1.0");
+    });
+  });
+
   test("branch pins report the latest release", () => {
     const a = analyze(dep({ kind: "branch", ref: "main" }), undefined, { versions });
     expect(a).toMatchObject({ status: "pinned", latest: "2.1.0" });
@@ -117,5 +145,66 @@ describe("requirements", () => {
     expect(fmt({ kind: "range", lower: "1.0.0", upper: "2.0.0", closed: false }, "2.1.0")).toBe(">=2.1.0 <3.0.0");
     expect(fmt({ kind: "branch", ref: "main" }, "1.4.0")).toBe("^1.4.0");
     expect(formatRequirement(bumpRequirement({ kind: "upToNextMajor", version: "1.0.0" }, "1.4.0", "exact"))).toBe("=1.4.0");
+  });
+});
+
+describe("protocol v2 ls-refs", () => {
+  const pkt = (s: string) => (s.length + 4).toString(16).padStart(4, "0") + s;
+  const oid = "a".repeat(40);
+
+  test("parses pkt-lines and rejects server errors", () => {
+    expect(parseLsRefsResponse(pkt(`${oid} refs/tags/1.0.0\n`) + pkt(`${oid} refs/tags/v1.1.0\n`) + "0000")).toEqual([
+      `${oid} refs/tags/1.0.0`,
+      `${oid} refs/tags/v1.1.0`,
+    ]);
+    expect(parseLsRefsResponse(pkt("ERR upload-pack: not our ref\n") + "0000")).toBeNull();
+    expect(parseLsRefsResponse("<html>")).toBeNull();
+  });
+
+  test("fetches tags over HTTP and falls back to git on 401", async () => {
+    const seen: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        seen.push(`${req.method} ${url.pathname} ${req.headers.get("git-protocol")} ${(await req.text()).includes("ref-prefix refs/tags/")}`);
+        if (url.pathname.startsWith("/private")) return new Response("auth", { status: 401 });
+        const body = pkt(`${oid} refs/tags/1.0.0\n`) + pkt(`${oid} refs/tags/2.0.0\n`) + "0000";
+        return new Response(body, { headers: { "content-type": "application/x-git-upload-pack-result" } });
+      },
+    });
+    try {
+      const fetcher = tagFetcher(5);
+      expect(await fetcher(`http://localhost:${server.port}/acme/Pkg.git`)).toEqual({ versions: ["2.0.0", "1.0.0"] });
+      expect(seen[0]).toBe("POST /acme/Pkg.git/git-upload-pack version=2 true");
+      // 401 → git ls-remote (which can use credential helpers); here git fails too and reports why.
+      const r = await fetcher(`http://localhost:${server.port}/private/Repo.git`);
+      expect("error" in r).toBe(true);
+      expect(seen.some((s) => s.startsWith("GET /private/Repo.git/info/refs"))).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("cache", () => {
+  test("caches versions and definite failures, not timeouts", async () => {
+    process.env.SPM_UPDATE_CACHE_DIR = mkdtempSync(join(tmpdir(), "spm-cache-"));
+    const calls: string[] = [];
+    const inner = async (url: string) => {
+      calls.push(url);
+      if (url === "ok") return { versions: ["1.0.0"] };
+      if (url === "gone") return { error: "repository not found" };
+      return { error: "timed out after 30s" };
+    };
+    const first = cachedFetcher(inner, 600);
+    for (const u of ["ok", "gone", "slow"]) await first(u);
+    first.flush();
+    const second = cachedFetcher(inner, 600);
+    expect(await second("ok")).toEqual({ versions: ["1.0.0"] });
+    expect(await second("gone")).toEqual({ error: "repository not found" });
+    await second("slow");
+    expect(calls).toEqual(["ok", "gone", "slow", "slow"]);
+    delete process.env.SPM_UPDATE_CACHE_DIR;
   });
 });

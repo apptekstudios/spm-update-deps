@@ -23,6 +23,8 @@ and compares each dependency's version to its git tags.
      version (or the requirement's floor). `-` means there is nothing newer.
    - `status`: `major|minor|patch` (the largest step available), `ok`, `pinned` (branch or
      revision; `major` then shows the newest release), `local`, or `error: <why>`.
+   - A `req` still on a beta/rc (`^5.0.0-beta`) whose release is out shows as outdated, with
+     the release in `patch`/`minor`/`major`. Moving to it is normally the right call.
    - Add `--urls` for repository URLs. Release notes for GitHub repos are at `<url>/releases`.
      Read them only for `major` bumps.
    - Use `--json` for structured output. Its fields: `inRange` = already allowed by `req`

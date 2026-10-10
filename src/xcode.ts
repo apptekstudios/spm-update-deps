@@ -1,4 +1,3 @@
-import { parse } from "@bacons/xcode/json";
 import type { Dependency, Requirement } from "./types.ts";
 import { identityFromUrl, nameFromUrl } from "./identity.ts";
 
@@ -50,23 +49,52 @@ export function requirementToPbx(req: Requirement): [string, string][] {
   }
 }
 
+const PBX_VALUE = String.raw`("(?:[^"\\]|\\.)*"|[^;\s]+)`;
+
+function pbxUnquote(v: string): string {
+  return v.startsWith('"') ? v.slice(1, -1).replace(/\\(.)/g, "$1") : v;
+}
+
+function pbxField(body: string, key: string): string | undefined {
+  const m = new RegExp(String.raw`(?:^|[\s{;])${key}\s*=\s*${PBX_VALUE}\s*;`).exec(body);
+  return m ? pbxUnquote(m[1]!) : undefined;
+}
+
+/**
+ * Finds Swift package reference objects by scanning the text rather than parsing the whole
+ * project: a full parse of a large project.pbxproj (~1MB) takes most of a second, and only
+ * these few objects matter. Keys are sorted in pbxproj files, so `isa` precedes any nested `{`.
+ */
+function scanPackageObjects(text: string): { id: string; isa: string; body: string }[] {
+  const out: { id: string; isa: string; body: string }[] = [];
+  const isaRe = /\bisa\s*=\s*"?(XCRemoteSwiftPackageReference|XCLocalSwiftPackageReference)"?\s*;/g;
+  for (const m of text.matchAll(isaRe)) {
+    const open = text.lastIndexOf("{", m.index);
+    const lineStart = text.lastIndexOf("\n", open) + 1;
+    const header = /^([ \t]*)"?([A-Za-z0-9_]+)"?/.exec(text.slice(lineStart, open));
+    if (!header) continue;
+    const close = text.indexOf(`\n${header[1]}};`, open);
+    out.push({ id: header[2]!, isa: m[1]!, body: text.slice(open + 1, close === -1 ? undefined : close) });
+  }
+  return out;
+}
+
 export function parseXcodeProject(text: string): Dependency[] {
-  const json = parse(text) as { objects?: Record<string, any> };
   const deps: Dependency[] = [];
-  for (const [id, obj] of Object.entries(json.objects ?? {})) {
-    if (obj?.isa === "XCRemoteSwiftPackageReference") {
-      const url: string | undefined = obj.repositoryURL;
+  for (const { id, isa, body } of scanPackageObjects(text)) {
+    if (isa === "XCRemoteSwiftPackageReference") {
+      const url = pbxField(body, "repositoryURL");
       if (!url) continue;
       deps.push({
         name: nameFromUrl(url),
         identity: identityFromUrl(url),
         source: "remote",
         url,
-        req: requirementFromPbx(readRequirementBlock(text, id) ?? stringify(obj.requirement)),
+        req: requirementFromPbx(readRequirementBlock(text, id) ?? undefined),
         handle: { id } satisfies XcodeHandle,
       });
-    } else if (obj?.isa === "XCLocalSwiftPackageReference") {
-      const path: string = obj.relativePath ?? obj.path ?? "";
+    } else {
+      const path = pbxField(body, "relativePath") ?? pbxField(body, "path") ?? "";
       const name = nameFromUrl(path);
       deps.push({ name, identity: name.toLowerCase(), source: "local", req: { kind: "unknown", raw: `path:${path}` }, handle: null });
     }
@@ -74,12 +102,7 @@ export function parseXcodeProject(text: string): Dependency[] {
   return deps.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function stringify(r: Record<string, unknown> | undefined): PbxRequirement | undefined {
-  if (!r || typeof r !== "object") return undefined;
-  return Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v == null ? undefined : String(v)]));
-}
-
-/** Same quoting rule as @bacons/xcode's writer. */
+/** Quotes values the way Xcode does: bare words for [A-Za-z0-9_$/:.], quoted otherwise. */
 function pbxValue(value: string): string {
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return /^[\w$/:.]+$/.test(escaped) ? escaped : `"${escaped}"`;
@@ -120,9 +143,8 @@ function readRequirementBlock(text: string, id: string): PbxRequirement | null {
   const loc = locateRequirementBlock(text, id);
   if (!loc) return null;
   const out: PbxRequirement = {};
-  for (const m of text.slice(loc.open, loc.close).matchAll(/(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|[^;\s]+)\s*;/g)) {
-    const v = m[2]!;
-    out[m[1]!] = v.startsWith('"') ? v.slice(1, -1).replace(/\\(.)/g, "$1") : v;
+  for (const m of text.slice(loc.open, loc.close).matchAll(new RegExp(String.raw`(\w+)\s*=\s*${PBX_VALUE}\s*;`, "g"))) {
+    out[m[1]!] = pbxUnquote(m[2]!);
   }
   return out;
 }

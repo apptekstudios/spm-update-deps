@@ -12,7 +12,8 @@ projects (`.xcodeproj`). It works well for people at a terminal and for coding a
 - **Minimal edits:** only the requirement text changes. Your formatting, comments, extra arguments such as `traits:`, and the requirement style (`from:` vs `.upToNextMajor(from:)`) are kept. Xcode projects get a few-line diff, not a re-serialized file.
 - **Requirement kinds are preserved:** an exact pin stays exact, a range stays a range, and branch/revision pins are never changed without an explicit version.
 - **Output formats:** a colored table and interactive mode for people; compact TSV and JSON for agents and scripts.
-- **Robust lookups:** git lookups run in parallel with a timeout, never hang on credential prompts, and are cached for 10 minutes.
+- **Fast lookups:** tags come from a single HTTP request per repository (git protocol v2), 16 in parallel. `git ls-remote` is the fallback for SSH and private repositories, so your credentials still work. Lookups never hang on prompts and are cached for 10 minutes. A 146-manifest repo with 210 dependencies checks in under a second.
+- **Prerelease aware:** if you're on a beta or rc (`from: "5.0.0-beta"`) and the release is out, it's flagged so you move to the real release.
 
 ## Installation
 
@@ -60,7 +61,7 @@ Next steps:
 - **Resolved**: the version locked in `Package.resolved`, if there is one.
 - **Patch / Minor / Major**: the newest version at each step above the resolved version (or above the requirement's lower bound).
 
-Options: `--outdated` (only the rows that need attention), `--versions[=N]` (list newer versions), `--urls`, `--include-prerelease`, `--fail-on-outdated` (exit 2, for CI).
+Options: `--outdated` (only the rows that need attention), `--versions[=N]` (list newer versions), `--urls`, `--include-prerelease`, `--fail-on-outdated` (exit 2, for CI), `--jobs N` (parallel lookups, default 16).
 
 ### Interactive
 
